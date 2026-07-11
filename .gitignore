@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.pyright/
+
+# claude-ast index cache (also self-ignored inside the dir at runtime)
+.claude-ast/
+
+# uv (commit uv.lock — this is an app/tool, so pin for reproducible installs)
+.uv/
