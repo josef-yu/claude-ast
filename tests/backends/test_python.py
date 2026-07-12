@@ -184,6 +184,57 @@ def test_external_base_class_becomes_an_external_inherits_edge(tmp_path):
     assert ("abc.ABC", "inherits", True) in deps
 
 
+def test_module_attribute_call_binds_to_an_external_node(tmp_path):
+    # `import os` then `os.getcwd()` — attribute chain rooted at a module import.
+    (tmp_path / "m.py").write_text("import os\n\n\ndef here():\n    return os.getcwd()\n")
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.external) for d in index.find_dependencies("m.here")}
+    assert ("os.getcwd", True) in deps
+
+
+def test_dotted_external_base_class_is_an_external_inherits_edge(tmp_path):
+    (tmp_path / "m.py").write_text("import abc\n\n\nclass C(abc.ABC):\n    ...\n")
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.kind, d.external) for d in index.find_dependencies("m.C")}
+    assert ("abc.ABC", "inherits", True) in deps
+
+
+def test_internal_module_attribute_call_binds_in_tree(tmp_path):
+    # `import pkg.mod` then `pkg.mod.f()` resolves to the in-tree symbol, not external.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "pkg" / "mod.py").write_text("def f():\n    ...\n")
+    (tmp_path / "main.py").write_text("import pkg.mod\n\n\ndef g():\n    return pkg.mod.f()\n")
+    index = Index.build(tmp_path)
+
+    assert "main.g" in {r.id for r in index.find_callers("pkg.mod.f")}
+    assert not index.graph.is_external("pkg.mod.f")
+
+
+def test_value_receiver_attribute_call_yields_no_edge(tmp_path):
+    # `x.run()` on a parameter is value-typed — deferred to P2, never a false edge.
+    (tmp_path / "m.py").write_text("def g(x):\n    return x.run()\n")
+    index = Index.build(tmp_path)
+
+    assert index.find_dependencies("m.g") == []
+    assert not index.graph.is_external("x.run")
+
+
+def test_unknown_attr_on_an_internal_module_is_deferred_not_externalized(tmp_path):
+    # `helpers.missing()` — internal root, unknown attribute — must NOT mint a bogus
+    # external node; it is left for the P2 resolver stack.
+    (tmp_path / "helpers.py").write_text("def real():\n    ...\n")
+    (tmp_path / "main.py").write_text(
+        "import helpers\n\n\ndef g():\n    return helpers.missing()\n"
+    )
+    index = Index.build(tmp_path)
+
+    assert index.find_dependencies("main.g") == []
+    assert not index.graph.is_external("helpers.missing")
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"

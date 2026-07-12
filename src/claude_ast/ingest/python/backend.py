@@ -56,14 +56,17 @@ class PythonIndexer:
         """Bind raw references to symbol ids, emitting SYNTACTIC/high-confidence edges.
 
         Resolves each reference against the same module's top-level definitions,
-        then its imports. An import to a target that exists in the index becomes an
-        in-tree edge; an import to a target that does not (stdlib, third-party) is
-        *not dropped* — it becomes a ``definite`` edge to an EXTERNAL node. The
-        reference is genuinely there; only P2's attribute/type work is uncertain, so
-        a direct import edge is honestly definite. Bare names with no import
-        (builtins, dynamic) still yield nothing.
+        then its imports — including attribute chains (``os.path.join``) whose root
+        is a module def or import. A target that exists in the index is an in-tree
+        edge; one whose top package is outside the project is a ``definite`` edge to
+        an EXTERNAL node (the reference is genuinely there; only P2's value-type work
+        is uncertain, so a direct/module-rooted reference is honestly definite). A
+        chain rooted in the project but not (yet) a known symbol — an attribute on a
+        value — is left for the P2 resolver stack. Bare names with no def/import
+        (builtins, dynamic, value receivers) still yield nothing.
         """
         all_ids = {sym.id for fi in files for sym in fi.symbols}
+        internal_roots = {fi.module.partition(".")[0] for fi in files}
         edges: list[Edge] = []
         externals: dict[str, Symbol] = {}
         for fi in files:
@@ -74,7 +77,7 @@ class PythonIndexer:
                 if s.parent == fi.module:
                     module_defs.setdefault(s.name, s.id)
             for ref in fi.refs:
-                bound = _bind(ref.name, module_defs, fi.imports, all_ids)
+                bound = _bind(ref.name, module_defs, fi.imports, all_ids, internal_roots)
                 if bound is None:
                     continue
                 dst, is_external = bound
@@ -85,19 +88,45 @@ class PythonIndexer:
 
 
 def _bind(
-    name: str, module_defs: dict[str, str], imports: dict[str, str], all_ids: set[str]
+    name: str,
+    module_defs: dict[str, str],
+    imports: dict[str, str],
+    all_ids: set[str],
+    internal_roots: set[str],
 ) -> tuple[str, bool] | None:
     """Resolve a reference name to ``(target_id, is_external)`` or ``None``.
 
-    ``is_external`` is True when an import points outside the indexed project — the
-    signal to mint an EXTERNAL node rather than an in-tree edge.
+    Handles a bare name and an attribute chain (``os.path.join``): the root is bound
+    via the module's own defs or its imports, then the trailing attribute path is
+    appended and classified.
     """
     if name in module_defs:
-        return module_defs[name], False
+        return _classify(module_defs[name], all_ids, internal_roots)
     if name in imports:
-        target = imports[name]
-        return target, target not in all_ids
+        return _classify(imports[name], all_ids, internal_roots)
+    root, _, rest = name.partition(".")
+    if rest:
+        base = module_defs.get(root) or imports.get(root)
+        if base is not None:
+            return _classify(f"{base}.{rest}", all_ids, internal_roots)
     return None
+
+
+def _classify(
+    target: str, all_ids: set[str], internal_roots: set[str]
+) -> tuple[str, bool] | None:
+    """A resolved qualname -> ``(target, is_external)``, or ``None`` to defer to P2.
+
+    An indexed symbol is a definite in-tree edge; a target whose top package is not
+    in the project is a definite external edge; a target rooted *in* the project but
+    not (yet) a known symbol is a value/dynamic attribute the P2 type resolvers own —
+    deferred rather than minted as a bogus external.
+    """
+    if target in all_ids:
+        return target, False
+    if target.partition(".")[0] in internal_roots:
+        return None
+    return target, True
 
 
 def _external_symbol(qualname: str) -> Symbol:

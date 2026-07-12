@@ -2,12 +2,15 @@
 
 Emits the syntactically-meaningful references:
 
-- ``CALL``     — a direct call ``foo()`` where ``foo`` is a bare name
-- ``INHERITS`` — a class base that is a bare name
+- ``CALL``     — a call whose callee is a name (``foo()``) or an attribute chain
+  rooted at a name (``os.path.join()``)
+- ``INHERITS`` — a class base that is such a name or attribute chain (``abc.ABC``)
 
 plus a module-level *import map* (local name -> target qualname) used later to
-bind names that came from another module. Attribute/method calls (``obj.save()``)
-need a value's type and are left for the resolver stack (P2).
+bind names that came from another module. Attribute chains rooted at a *value*
+(``obj.save()`` — the receiver's type is unknown) are still emitted, but only the
+module-rooted ones bind here; typing a value receiver is the resolver stack's job
+(P2).
 
 Scope handling is conservative in service of honest confidence: before binding a
 bare name we skip it if it is bound as a local anywhere in an enclosing function
@@ -53,11 +56,12 @@ def _visit(
         for deco in node.decorator_list:
             _visit(deco, enclosing, path, refs, locals_, node_ids)
         for base in node.bases:
-            if isinstance(base, ast.Name):
-                if not _local(base.id, locals_):
-                    refs.append(RawRef(cid, EdgeKind.INHERITS, base.id, span(path, base)))
+            dotted = _dotted_name(base)
+            if dotted is not None:
+                if not _local(dotted.partition(".")[0], locals_):
+                    refs.append(RawRef(cid, EdgeKind.INHERITS, dotted, span(path, base)))
             else:
-                _visit(base, enclosing, path, refs, locals_, node_ids)
+                _visit(base, enclosing, path, refs, locals_, node_ids)  # e.g. Generic[T], a call
         for kw in node.keywords:
             _visit(kw.value, enclosing, path, refs, locals_, node_ids)
         for stmt in node.body:
@@ -83,12 +87,10 @@ def _visit(
             _visit(stmt, fid, path, refs, inner, node_ids)
         return
 
-    if (
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and not _local(node.func.id, locals_)
-    ):
-        refs.append(RawRef(enclosing, EdgeKind.CALL, node.func.id, span(path, node.func)))
+    if isinstance(node, ast.Call):
+        callee = _dotted_name(node.func)
+        if callee is not None and not _local(callee.partition(".")[0], locals_):
+            refs.append(RawRef(enclosing, EdgeKind.CALL, callee, span(path, node.func)))
 
     for child in ast.iter_child_nodes(node):
         _visit(child, enclosing, path, refs, locals_, node_ids)
@@ -96,6 +98,23 @@ def _visit(
 
 def _local(name: str, locals_: list[frozenset[str]]) -> bool:
     return any(name in scope for scope in locals_)
+
+
+def _dotted_name(node: ast.expr) -> str | None:
+    """The dotted path of a name or attribute-chain rooted at a name (``os.path.join``),
+    else ``None`` when rooted at a *value* — a call, subscript, or literal whose type
+    only P2 can resolve. ``self.x`` / ``obj.y`` return a path too (root ``self`` /
+    ``obj``); they just won't bind until a resolver can type the receiver.
+    """
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        parts.reverse()
+        return ".".join(parts)
+    return None
 
 
 def _all_args(args: ast.arguments) -> list[ast.arg]:

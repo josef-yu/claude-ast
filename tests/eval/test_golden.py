@@ -84,6 +84,12 @@ def test_external_dependencies_resolve_as_definite_external_edges(index: Index) 
     assert ("abc.ABC", "inherits", True) in {(d.id, d.kind, d.external) for d in base}
 
 
+def test_module_attribute_call_resolves_to_an_external_edge(index: Index) -> None:
+    # `os.getcwd()` — a call through a module attribute — binds to os.getcwd, not dropped.
+    deps = index.find_dependencies("sample_pkg.externals.working_dir")
+    assert ("os.getcwd", "call", True) in {(d.id, d.kind, d.external) for d in deps}
+
+
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:
     # Library nodes are edge sinks, never part of the ranked skeleton.
     ids = {e.id for e in index.repo_map(budget=1000)}
