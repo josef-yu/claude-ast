@@ -16,7 +16,10 @@ def _file_index() -> FileIndex:
                 signature="def f()", parent="m",
             ),
         ],
-        refs=[RawRef("m.f", EdgeKind.CALL, "g", Span("m.py", 4, 4, 4, 5))],
+        refs=[
+            RawRef("m.f", EdgeKind.CALL, "g", Span("m.py", 4, 4, 4, 5)),
+            RawRef("m.f", EdgeKind.CALL, "self.save", Span("m.py", 5, 4, 5, 8), local_root=True),
+        ],
         imports={"g": "other.g"},
     )
 
@@ -43,6 +46,9 @@ def test_store_round_trips_a_file_index(tmp_path):
     assert f.parent == "m"
     assert (f.span.end_line, f.span.end_col) == (5, 4)  # spans survive
     assert fi.refs[0].kind is EdgeKind.CALL and fi.refs[0].name == "g"
+    # local_root round-trips both ways (omitted-when-false vs. persisted-when-true)
+    assert fi.refs[0].local_root is False
+    assert fi.refs[1].name == "self.save" and fi.refs[1].local_root is True
 
 
 def test_store_delete_prunes_files(tmp_path):

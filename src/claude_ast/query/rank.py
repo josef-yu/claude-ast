@@ -40,11 +40,13 @@ def pagerank(
     out_weight: dict[SymbolId, float] = {}
     for i in ids:
         # Edges to EXTERNAL sinks carry no importance (and aren't ranked nodes), so
-        # they neither flow rank nor count toward this node's out-weight.
+        # they neither flow rank nor count toward this node's out-weight. Self-loops
+        # (a recursive call) are dropped too — they would only feed a node's rank back
+        # into itself and inflate it.
         pairs = [
             (e.dst, _WEIGHT[e.resolution.confidence])
             for e in graph.out_edges(i)
-            if e.kind in _RANK_KINDS and e.dst in internal
+            if e.kind in _RANK_KINDS and e.dst in internal and e.dst != i
         ]
         adjacency[i] = pairs
         out_weight[i] = sum(w for _, w in pairs)

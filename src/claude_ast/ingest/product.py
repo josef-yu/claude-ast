@@ -20,15 +20,18 @@ class RawRef:
     """A reference site, not yet bound to a target symbol.
 
     ``name`` is the dotted path as written (``foo``, ``os.path.join``,
-    ``obj.save``). Syntactic binding (P1) resolves names-in-scope and imports;
-    attribute-on-value refs (``obj.save``) stay unresolved for the type
-    resolvers (P2).
+    ``self.save``). Syntactic binding (P1) resolves names-in-scope and imports.
+    ``local_root`` marks a value receiver — the root name is a local (``self``,
+    a parameter, a local var) — which syntactic binding must *never* touch (a
+    local can shadow an import, so binding it would forge a wrong edge); these
+    are left for the type resolvers, which know the receiver's type.
     """
 
     src: SymbolId  # the enclosing symbol making the reference
     kind: EdgeKind
     name: str
     at: Span
+    local_root: bool = False
 
 
 @dataclass(slots=True)

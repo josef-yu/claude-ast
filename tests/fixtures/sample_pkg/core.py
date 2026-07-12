@@ -9,6 +9,10 @@ class Base:
     def save(self) -> None:
         """Persist the object."""
 
+    def persist(self) -> None:
+        """Delegates to ``self.save`` — a value-typed (possible) self-call."""
+        self.save()
+
 
 def hub() -> int:
     """Central function that many callers use."""

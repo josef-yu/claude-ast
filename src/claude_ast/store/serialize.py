@@ -68,8 +68,17 @@ def _symbol(v: dict) -> Symbol:
 
 
 def _ref_d(r: RawRef) -> dict[str, object]:
-    return {"s": r.src, "k": r.kind.value, "n": r.name, "a": _span_d(r.at)}
+    d: dict[str, object] = {"s": r.src, "k": r.kind.value, "n": r.name, "a": _span_d(r.at)}
+    if r.local_root:
+        d["l"] = 1  # omit when false to keep the common-case blob small
+    return d
 
 
 def _ref(v: dict) -> RawRef:
-    return RawRef(src=v["s"], kind=EdgeKind(v["k"]), name=v["n"], at=_span(v["a"]))
+    return RawRef(
+        src=v["s"],
+        kind=EdgeKind(v["k"]),
+        name=v["n"],
+        at=_span(v["a"]),
+        local_root=bool(v.get("l")),
+    )

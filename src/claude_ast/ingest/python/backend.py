@@ -17,6 +17,7 @@ from ..product import FileIndex, ResolveResult
 from .common import module_qualname
 from .refs import extract_refs
 from .symbols import extract_symbols
+from .typeres import resolve_self
 
 
 class PythonIndexer:
@@ -77,6 +78,8 @@ class PythonIndexer:
                 if s.parent == fi.module:
                     module_defs.setdefault(s.name, s.id)
             for ref in fi.refs:
+                if ref.local_root:
+                    continue  # value receiver — the type resolvers own it, not syntactic binding
                 bound = _bind(ref.name, module_defs, fi.imports, all_ids, internal_roots)
                 if bound is None:
                     continue
@@ -84,6 +87,9 @@ class PythonIndexer:
                 if is_external:
                     externals.setdefault(dst, _external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
+        # Value-typed pass: self.m() -> the enclosing class's member, as MEDIUM/possible edges.
+        # Runs last, so the cross-file INHERITS edges it walks are already in `edges`.
+        edges.extend(resolve_self(files, edges))
         return ResolveResult(edges=edges, externals=list(externals.values()))
 
 

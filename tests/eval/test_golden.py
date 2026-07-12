@@ -90,6 +90,24 @@ def test_module_attribute_call_resolves_to_an_external_edge(index: Index) -> Non
     assert ("os.getcwd", "call", True) in {(d.id, d.kind, d.external) for d in deps}
 
 
+def test_self_call_resolves_to_the_class_member_as_possible(index: Index) -> None:
+    # `self.save()` in Base.persist -> Base.save, at the possible tier (value-typed).
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.core.Base.persist")}
+    assert ("sample_pkg.core.Base.save", "call", "possible") in deps
+
+
+def test_self_call_resolves_through_a_cross_file_base(index: Index) -> None:
+    # `self.save()` in Service.store resolves to the INHERITED Base.save (a different module).
+    deps = {(d.id, d.tier) for d in index.find_dependencies("sample_pkg.service.Service.store")}
+    assert ("sample_pkg.core.Base.save", "possible") in deps
+    callers = index.find_callers("sample_pkg.core.Base.save")
+    assert {r.id for r in callers} == {
+        "sample_pkg.core.Base.persist",
+        "sample_pkg.service.Service.store",
+    }
+    assert all(r.tier == "possible" for r in callers)
+
+
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:
     # Library nodes are edge sinks, never part of the ranked skeleton.
     ids = {e.id for e in index.repo_map(budget=1000)}
@@ -99,6 +117,19 @@ def test_external_targets_stay_out_of_ranking(index: Index) -> None:
 def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Persisted round-trip via the snapshot must reproduce the cold-build answers.
     monkeypatch.setenv("CLAUDE_AST_CACHE_DIR", str(tmp_path))
-    cold = {r.id for r in Index.build(FIXTURES).find_callers("sample_pkg.core.hub")}
-    warm = {r.id for r in Index.build(FIXTURES).find_callers("sample_pkg.core.hub")}
-    assert cold == warm == {"sample_pkg.service.Service.run", "sample_pkg.service.start"}
+    cold_index = Index.build(FIXTURES)  # cold: parses and writes the snapshot
+    warm_index = Index.build(FIXTURES)  # warm: reuses persisted refs, rebuilds edges
+
+    def callers(index: Index, symbol: str) -> set[str]:
+        return {r.id for r in index.find_callers(symbol)}
+
+    # syntactic (definite) edges reproduce...
+    hub_callers = {"sample_pkg.service.Service.run", "sample_pkg.service.start"}
+    assert callers(cold_index, "sample_pkg.core.hub") == hub_callers
+    assert callers(warm_index, "sample_pkg.core.hub") == hub_callers
+
+    # ...and so do the value-typed (possible) self edges, which are only reproduced if
+    # RawRef.local_root survives the store round-trip (else the warm self-edges vanish).
+    save_callers = {"sample_pkg.core.Base.persist", "sample_pkg.service.Service.store"}
+    assert callers(cold_index, "sample_pkg.core.Base.save") == save_callers
+    assert callers(warm_index, "sample_pkg.core.Base.save") == save_callers

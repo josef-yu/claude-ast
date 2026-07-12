@@ -10,6 +10,10 @@ class Service(Base):
         """Delegate to the hub."""
         return hub()
 
+    def store(self) -> None:
+        """Calls ``self.save`` — resolves cross-file to the inherited ``Base.save``."""
+        self.save()
+
 
 def start() -> int:
     """Entry point that calls the hub."""

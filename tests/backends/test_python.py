@@ -235,6 +235,105 @@ def test_unknown_attr_on_an_internal_module_is_deferred_not_externalized(tmp_pat
     assert not index.graph.is_external("helpers.missing")
 
 
+def test_self_call_resolves_to_the_enclosing_class_member_as_possible(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "class C:\n"
+        "    def run(self):\n        return self.save()\n"
+        "    def save(self):\n        ...\n"
+    )
+    index = Index.build(tmp_path)
+
+    save = [d for d in index.find_dependencies("m.C.run") if d.id == "m.C.save"]
+    assert save and save[0].kind == "call" and save[0].tier == "possible"
+    assert "m.C.run" in {r.id for r in index.find_callers("m.C.save")}
+
+
+def test_self_call_resolves_through_an_in_tree_base(tmp_path):
+    (tmp_path / "base.py").write_text("class Base:\n    def save(self):\n        ...\n")
+    (tmp_path / "m.py").write_text(
+        "from base import Base\n\n\n"
+        "class Sub(Base):\n    def run(self):\n        return self.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    assert ("base.Base.save", "call", "possible") in {
+        (d.id, d.kind, d.tier) for d in index.find_dependencies("m.Sub.run")
+    }
+
+
+def test_self_call_to_unknown_member_yields_no_edge(tmp_path):
+    (tmp_path / "m.py").write_text("class C:\n    def run(self):\n        return self.missing()\n")
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.C.run") == []
+
+
+def test_self_in_a_nested_function_is_not_a_method_receiver(tmp_path):
+    # self.save() lives in the nested `inner` (a FUNCTION, not a METHOD) -> not resolved.
+    (tmp_path / "m.py").write_text(
+        "class C:\n"
+        "    def save(self):\n        ...\n"
+        "    def run(self):\n"
+        "        def inner():\n            return self.save()\n"
+        "        return inner()\n"
+    )
+    index = Index.build(tmp_path)
+    assert "m.C.run.inner" not in {r.id for r in index.find_callers("m.C.save")}
+
+
+def test_shadowing_local_receiver_does_not_forge_a_definite_edge(tmp_path):
+    # `getcwd` is a param shadowing the import; `getcwd.write()` is a value receiver and
+    # must NOT bind through the import to a false definite external edge.
+    (tmp_path / "m.py").write_text(
+        "from os import getcwd\n\n\ndef f(getcwd):\n    return getcwd.write()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.f") == []
+    assert not index.graph.is_external("os.getcwd.write")
+
+
+def test_self_call_to_a_class_variable_is_not_a_call_edge(tmp_path):
+    # `self.count()` where `count` is a class variable must not forge a call->variable edge.
+    (tmp_path / "m.py").write_text(
+        "class C:\n    count = 0\n    def run(self):\n        return self.count()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.C.run") == []
+
+
+def test_self_call_resolves_to_the_nearest_override(tmp_path):
+    # A defines m, B(A) overrides m; self.m() in Sub(B) resolves to the NEAREST (B.m).
+    (tmp_path / "m.py").write_text(
+        "class A:\n    def m(self):\n        ...\n"
+        "class B(A):\n    def m(self):\n        ...\n"
+        "class Sub(B):\n    def run(self):\n        return self.m()\n"
+    )
+    index = Index.build(tmp_path)
+    assert ("m.B.m", "possible") in {(d.id, d.tier) for d in index.find_dependencies("m.Sub.run")}
+
+
+def test_self_call_ambiguous_across_bases_yields_no_edge(tmp_path):
+    # Two bases on different branches define `m` -> the target is MRO-dependent, so no edge.
+    (tmp_path / "m.py").write_text(
+        "class X:\n    def m(self):\n        ...\n"
+        "class A(X):\n    pass\n"
+        "class B:\n    def m(self):\n        ...\n"
+        "class C(A, B):\n    def run(self):\n        return self.m()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.C.run") == []
+
+
+def test_match_capture_name_is_a_local_receiver_not_an_import(tmp_path):
+    # `case getcwd:` binds a local; `getcwd.write()` must NOT bind through the import.
+    (tmp_path / "m.py").write_text(
+        "from os import getcwd\n\n\n"
+        "def f(cmd):\n    match cmd:\n        case getcwd:\n            return getcwd.write()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.f") == []
+    assert not index.graph.is_external("os.getcwd.write")
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"

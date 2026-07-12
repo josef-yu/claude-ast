@@ -7,10 +7,11 @@ Emits the syntactically-meaningful references:
 - ``INHERITS`` — a class base that is such a name or attribute chain (``abc.ABC``)
 
 plus a module-level *import map* (local name -> target qualname) used later to
-bind names that came from another module. Attribute chains rooted at a *value*
-(``obj.save()`` — the receiver's type is unknown) are still emitted, but only the
-module-rooted ones bind here; typing a value receiver is the resolver stack's job
-(P2).
+bind names that came from another module. Attribute chains rooted at a *local*
+value (``self.save()``, ``u.save()``) are recorded with ``local_root=True`` — kept
+OUT of syntactic binding (a local root may shadow an import, so binding it would
+forge a wrong edge) and left for the P2 type resolvers, which know the receiver's
+type. A bare local call (``x()``) is still skipped — there is nothing to resolve.
 
 Scope handling is conservative in service of honest confidence: before binding a
 bare name we skip it if it is bound as a local anywhere in an enclosing function
@@ -89,8 +90,15 @@ def _visit(
 
     if isinstance(node, ast.Call):
         callee = _dotted_name(node.func)
-        if callee is not None and not _local(callee.partition(".")[0], locals_):
-            refs.append(RawRef(enclosing, EdgeKind.CALL, callee, span(path, node.func)))
+        if callee is not None:
+            if not _local(callee.partition(".")[0], locals_):
+                refs.append(RawRef(enclosing, EdgeKind.CALL, callee, span(path, node.func)))
+            elif "." in callee:
+                # value receiver (self.save(), u.save()): record for the type resolvers,
+                # flagged so syntactic binding never mis-resolves a shadowing local.
+                refs.append(
+                    RawRef(enclosing, EdgeKind.CALL, callee, span(path, node.func), local_root=True)
+                )
 
     for child in ast.iter_child_nodes(node):
         _visit(child, enclosing, path, refs, locals_, node_ids)
@@ -171,6 +179,10 @@ def _add_bound(node: ast.AST, names: set[str]) -> None:
     elif isinstance(node, ast.Import | ast.ImportFrom):
         for alias in node.names:
             names.add(alias.asname or alias.name.split(".")[0])
+    elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+        names.add(node.name)  # `case <name>:` / `case [*<name>]` binds a local
+    elif isinstance(node, ast.MatchMapping) and node.rest:
+        names.add(node.rest)  # `case {**<rest>}` binds a local
 
 
 def _add_target(target: ast.expr, names: set[str]) -> None:

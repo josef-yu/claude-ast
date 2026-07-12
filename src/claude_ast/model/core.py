@@ -62,6 +62,18 @@ class Resolution:
         """The always-on, always-certain base — no type resolution needed."""
         return cls(ResolutionSource.SYNTACTIC, Confidence.HIGH)
 
+    @classmethod
+    def inferred(cls) -> Resolution:
+        """A value-typed inference (e.g. ``self.m()`` -> the enclosing class's member).
+
+        MEDIUM/possible, never definite: the statically-named target is real, but
+        polymorphic dispatch means a subclass may override it at runtime. ``self``'s
+        receiver type is known *exactly* (the enclosing class) — the most certain of
+        the value cases — so a later precedence model must not let a mere annotation
+        out-rank it, despite ANNOTATION out-trusting INFERENCE in the source order.
+        """
+        return cls(ResolutionSource.INFERENCE, Confidence.MEDIUM)
+
 
 class SymbolKind(StrEnum):
     MODULE = "module"
