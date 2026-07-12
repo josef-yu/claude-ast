@@ -58,3 +58,31 @@ def test_orchestrator_routes_to_any_backend_by_protocol(tmp_path):
     result = ingest_project(tmp_path, indexers=[FakeBackend()])
     ids = {sym.id for fi in result.files for sym in fi.symbols}
     assert ids == {"thing"}  # only the fake backend's files; .py ignored
+
+
+def test_warm_start_reuses_unchanged_files(tmp_path):
+    (tmp_path / "a.py").write_text("def f():\n    ...\n")
+    cold = ingest_project(tmp_path)
+    assert set(cold.fresh)  # cold run parses everything fresh
+
+    cache = dict(cold.fresh)
+    warm = ingest_project(tmp_path, cache=cache)
+    assert warm.fresh == {}  # unchanged file reused, not reparsed
+    assert {s.id for fi in warm.files for s in fi.symbols} == {"a", "a.f"}
+
+
+def test_changed_file_is_reparsed_and_deletion_pruned(tmp_path):
+    a = tmp_path / "a.py"
+    a.write_text("def f():\n    ...\n")
+    (tmp_path / "b.py").write_text("def g():\n    ...\n")
+    cold = ingest_project(tmp_path)
+    cache = dict(cold.fresh)
+
+    a.write_text("def f():\n    ...\n\n\ndef h():\n    ...\n")  # size changes -> stamp differs
+    (tmp_path / "b.py").unlink()  # deletion
+
+    warm = ingest_project(tmp_path, cache=cache)
+    assert str(a) in warm.fresh  # changed file reparsed
+    assert str(tmp_path / "b.py") not in warm.present  # gone -> prunable
+    ids = {s.id for fi in warm.files for s in fi.symbols}
+    assert ids == {"a", "a.f", "a.h"}

@@ -133,3 +133,15 @@ def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     index = Index.build(tmp_path)
 
     assert index.find_callers("m.run") == []
+
+
+def test_warm_start_preserves_results_and_writes_a_snapshot(tmp_path):
+    (tmp_path / "m.py").write_text("def helper():\n    ...\n\n\ndef use():\n    helper()\n")
+
+    first = Index.build(tmp_path)  # cold — parses + writes snapshot
+    assert (tmp_path / ".claude-ast" / "index.db").exists()
+
+    second = Index.build(tmp_path)  # warm — reuses the snapshot
+    cold_callers = {r.id for r in first.find_callers("m.helper")}
+    warm_callers = {r.id for r in second.find_callers("m.helper")}
+    assert cold_callers == warm_callers == {"m.use"}  # identical across cold/warm

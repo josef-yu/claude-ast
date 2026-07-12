@@ -15,7 +15,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from .index import Index
+from .index import Index, store_path
 from .ingest import ingest_project
 from .query import render_repo_map
 
@@ -48,7 +48,8 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--focus", default=None, help="bias the map toward a symbol/module id")
     p_map.add_argument("--budget", type=int, default=2000, help="token budget (default: 2000)")
 
-    sub.add_parser("status", help="show index freshness")
+    p_status = sub.add_parser("status", help="show index freshness")
+    p_status.add_argument("path", nargs="?", default=".", help="project root (default: .)")
 
     args = parser.parse_args(argv)
 
@@ -65,8 +66,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "repo-map":
         return _cmd_repo_map(Path(args.path), args.focus, args.budget)
     if args.command == "status":
-        print("claude-ast: 'status' is not implemented yet (P1).", file=sys.stderr)
-        return 1
+        return _cmd_status(Path(args.path))
 
     parser.print_help()
     return 0
@@ -148,6 +148,20 @@ def _cmd_repo_map(root: Path, focus: str | None, budget: int) -> int:
         print("claude-ast: empty index", file=sys.stderr)
         return 1
     print(render_repo_map(entries))
+    return 0
+
+
+def _cmd_status(root: Path) -> int:
+    if not root.exists():
+        print(f"claude-ast: path not found: {root}", file=sys.stderr)
+        return 2
+
+    snapshot = store_path(root)
+    warm = snapshot.exists()
+    index = Index.build(root)
+    print(f"root:     {root}")
+    print(f"symbols:  {len(index.graph)}")
+    print(f"snapshot: {snapshot} ({'warm — reused' if warm else 'created (cold start)'})")
     return 0
 
 

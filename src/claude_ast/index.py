@@ -1,13 +1,15 @@
-"""The Index — the engine orchestrator (seed).
+"""The Index — the engine orchestrator.
 
-Owns the in-memory Graph and answers queries. Built from a project ingest; the
-Store, resolver stack, and watcher hang off this as they land. This is the facade
-the CLI drives today and the MCP server will wrap later. It is language-neutral —
+Owns the in-memory Graph and answers queries. Built from a project ingest,
+warm-started from a SQLite snapshot so unchanged files are never reparsed. The
+facade the CLI drives today and the MCP server will wrap later. Language-neutral —
 it speaks the Indexer protocol and the model, never ``ast``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -25,6 +27,16 @@ from .query import (
     outline,
     repo_map,
 )
+from .store import SqliteStore
+
+
+def store_path(root: Path) -> Path:
+    """Where the snapshot lives: in-repo by default, or keyed under CLAUDE_AST_CACHE_DIR."""
+    override = os.environ.get("CLAUDE_AST_CACHE_DIR")
+    if override:
+        key = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
+        return Path(override) / key / "index.db"
+    return root / ".claude-ast" / "index.db"
 
 
 class Index:
@@ -33,15 +45,29 @@ class Index:
         self.root = root
 
     @classmethod
-    def build(cls, root: Path, indexers: Sequence[Indexer] | None = None) -> Index:
-        """Ingest a project and assemble its Graph — symbols, then edges.
+    def build(
+        cls,
+        root: Path,
+        indexers: Sequence[Indexer] | None = None,
+        use_store: bool = True,
+    ) -> Index:
+        """Ingest a project (warm-started from the snapshot) and assemble its Graph.
 
-        Symbols are added neutrally; edges come from each backend's own
-        (backend-scoped) ``resolve``. P2's resolver stack extends the edges with
-        type-dependent, confidence-graded ones.
+        Unchanged files are reused from the snapshot; only fresh parses are
+        re-persisted and deleted files pruned. Symbols are added neutrally; edges
+        come from each backend's own (backend-scoped) ``resolve``.
         """
         backends = tuple(indexers) if indexers is not None else default_indexers()
-        result = ingest_project(root, backends)
+        store = SqliteStore(store_path(root)) if use_store else None
+        cache = store.load() if store is not None else {}
+
+        result = ingest_project(root, backends, cache=cache)
+
+        if store is not None:
+            for path, cached in result.fresh.items():
+                store.upsert(path, cached.stamp, cached.file)
+            store.delete(set(cache) - result.present)
+            store.close()
 
         graph = Graph()
         for file_index in result.files:

@@ -43,7 +43,21 @@ class FileIndex:
     imports: dict[str, str] = field(default_factory=dict)
 
 
+type FileStamp = tuple[int, int]
+"""A cheap change-detector for a file: (mtime_ns, size). Cache hit => skip reparse."""
+
+
+@dataclass(slots=True)
+class CachedFile:
+    """A persisted parse product plus the stamp it was parsed at."""
+
+    stamp: FileStamp
+    file: FileIndex
+
+
 @dataclass(slots=True)
 class ProjectIngest:
     files: list[FileIndex]
     skipped: list[str]  # paths we couldn't read/parse (kept out of the index)
+    fresh: dict[str, CachedFile]  # newly (re)parsed this run — to persist
+    present: set[str]  # every current source path — for pruning deletions
