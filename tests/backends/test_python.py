@@ -420,6 +420,46 @@ def test_relative_import_beyond_top_level_is_skipped(tmp_path):
     assert index.find_dependencies("pkg.m.f") == []
 
 
+def test_package_reexport_binds_to_the_real_definition(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .core import hub\n")  # re-export
+    (pkg / "core.py").write_text("def hub():\n    ...\n")
+    (pkg / "app.py").write_text("from pkg import hub\n\n\ndef run():\n    return hub()\n")
+    index = Index.build(tmp_path)
+
+    # `from pkg import hub` follows pkg/__init__'s re-export to the real pkg.core.hub
+    assert "pkg.app.run" in {r.id for r in index.find_callers("pkg.core.hub")}
+
+
+def test_reexported_class_feeds_annotation_resolution(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("from .model import Graph\n")
+    (pkg / "model.py").write_text("class Graph:\n    def add(self):\n        ...\n")
+    (pkg / "app.py").write_text(
+        "from pkg import Graph\n\n\ndef run(g: Graph):\n    return g.add()\n"
+    )
+    index = Index.build(tmp_path)
+
+    # the re-exported type resolves, so `g: Graph; g.add()` binds to pkg.model.Graph.add
+    assert ("pkg.model.Graph.add", "possible") in {
+        (d.id, d.tier) for d in index.find_dependencies("pkg.app.run")
+    }
+
+
+def test_reexport_chain_is_followed(tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from .sub import work\n")           # pkg.work -> pkg.sub.work
+    (pkg / "sub" / "__init__.py").write_text("from .impl import work\n")  # -> pkg.sub.impl.work
+    (pkg / "sub" / "impl.py").write_text("def work():\n    ...\n")
+    (pkg / "app.py").write_text("from pkg import work\n\n\ndef run():\n    return work()\n")
+    index = Index.build(tmp_path)
+
+    assert "pkg.app.run" in {r.id for r in index.find_callers("pkg.sub.impl.work")}
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"

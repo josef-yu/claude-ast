@@ -12,8 +12,9 @@ import ast
 from collections.abc import Sequence
 from pathlib import Path
 
-from ...model import Edge, Resolution, Span, Symbol, SymbolKind
+from ...model import Edge, Resolution, Symbol
 from ..product import FileIndex, ResolveResult
+from .binding import bind, external_symbol
 from .common import module_qualname
 from .refs import extract_refs
 from .symbols import extract_symbols
@@ -68,6 +69,9 @@ class PythonIndexer:
         """
         all_ids = {sym.id for fi in files for sym in fi.symbols}
         internal_roots = {fi.module.partition(".")[0] for fi in files}
+        # Each module's import map doubles as its re-export table: a name imported into
+        # module M is reachable as M.name, so `from pkg import X` follows pkg's __init__.
+        reexports = {fi.module: fi.imports for fi in files}
         edges: list[Edge] = []
         externals: dict[str, Symbol] = {}
         for fi in files:
@@ -80,67 +84,14 @@ class PythonIndexer:
             for ref in fi.refs:
                 if ref.local_root:
                     continue  # value receiver — the type resolvers own it, not syntactic binding
-                bound = _bind(ref.name, module_defs, fi.imports, all_ids, internal_roots)
+                bound = bind(ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports)
                 if bound is None:
                     continue
                 dst, is_external = bound
                 if is_external:
-                    externals.setdefault(dst, _external_symbol(dst))
+                    externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
         # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges.
         # Runs last, so the cross-file INHERITS edges it walks are already in `edges`.
-        edges.extend(resolve_value_types(files, edges))
+        edges.extend(resolve_value_types(files, edges, reexports))
         return ResolveResult(edges=edges, externals=list(externals.values()))
-
-
-def _bind(
-    name: str,
-    module_defs: dict[str, str],
-    imports: dict[str, str],
-    all_ids: set[str],
-    internal_roots: set[str],
-) -> tuple[str, bool] | None:
-    """Resolve a reference name to ``(target_id, is_external)`` or ``None``.
-
-    Handles a bare name and an attribute chain (``os.path.join``): the root is bound
-    via the module's own defs or its imports, then the trailing attribute path is
-    appended and classified.
-    """
-    if name in module_defs:
-        return _classify(module_defs[name], all_ids, internal_roots)
-    if name in imports:
-        return _classify(imports[name], all_ids, internal_roots)
-    root, _, rest = name.partition(".")
-    if rest:
-        base = module_defs.get(root) or imports.get(root)
-        if base is not None:
-            return _classify(f"{base}.{rest}", all_ids, internal_roots)
-    return None
-
-
-def _classify(
-    target: str, all_ids: set[str], internal_roots: set[str]
-) -> tuple[str, bool] | None:
-    """A resolved qualname -> ``(target, is_external)``, or ``None`` to defer to P2.
-
-    An indexed symbol is a definite in-tree edge; a target whose top package is not
-    in the project is a definite external edge; a target rooted *in* the project but
-    not (yet) a known symbol is a value/dynamic attribute the P2 type resolvers own —
-    deferred rather than minted as a bogus external.
-    """
-    if target in all_ids:
-        return target, False
-    if target.partition(".")[0] in internal_roots:
-        return None
-    return target, True
-
-
-def _external_symbol(qualname: str) -> Symbol:
-    """A leaf node for a library/stdlib target: an edge sink with no in-tree source.
-
-    The id is the imported qualname — versionless, because one Python environment
-    resolves each package to a single version (unlike npm). A JS/TS backend is free
-    to mint a richer external id; the neutral layer treats it as opaque.
-    """
-    name = qualname.rsplit(".", 1)[-1]
-    return Symbol(qualname, name, SymbolKind.EXTERNAL, Span("<external>", 0))

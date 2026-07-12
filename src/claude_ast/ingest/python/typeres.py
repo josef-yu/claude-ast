@@ -27,9 +27,12 @@ from collections.abc import Sequence
 
 from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
+from .binding import follow_reexports
 
 
-def resolve_value_types(files: Sequence[FileIndex], edges: Sequence[Edge]) -> list[Edge]:
+def resolve_value_types(
+    files: Sequence[FileIndex], edges: Sequence[Edge], reexports: dict[str, dict[str, str]]
+) -> list[Edge]:
     """Resolve value-typed receiver calls to MEDIUM (``possible``) edges — the two ways a
     receiver's type is statically known:
 
@@ -41,6 +44,7 @@ def resolve_value_types(files: Sequence[FileIndex], edges: Sequence[Edge]) -> li
     ``local_root`` refs are considered, single attribute only (chained ``a.b.c`` deferred).
     """
     by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
+    all_ids = set(by_id)
     members = _members(files)
     bases = _bases(edges, by_id)
 
@@ -60,7 +64,9 @@ def resolve_value_types(files: Sequence[FileIndex], edges: Sequence[Edge]) -> li
                 class_id = _self_class(ref.src, by_id)
                 resolution = Resolution.inferred()
             elif ref.receiver_type is not None:
-                class_id = _resolve_type_name(ref.receiver_type, module_defs, fi.imports, by_id)
+                class_id = _resolve_type_name(
+                    ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
+                )
                 resolution = Resolution.annotated()
             else:
                 continue  # a value receiver we can't type yet (unannotated non-self)
@@ -86,14 +92,17 @@ def _resolve_type_name(
     name: str,
     module_defs: dict[str, str],
     imports: dict[str, str],
+    all_ids: set[SymbolId],
+    reexports: dict[str, dict[str, str]],
     by_id: dict[SymbolId, Symbol],
 ) -> SymbolId | None:
     """A type name in a file's scope -> its in-tree CLASS id, or None.
 
     Resolves a bare or dotted annotation name (``User``, ``models.User``) through the
-    file's own definitions and imports — the same inputs syntactic binding uses — and
-    keeps it only if it lands on an in-tree class. An external or non-class target is
-    None: the members of an unindexed class can't be looked up here.
+    file's own definitions and imports — the same inputs syntactic binding uses,
+    including package re-exports — and keeps it only if it lands on an in-tree class.
+    An external or non-class target is None: the members of an unindexed class can't be
+    looked up here.
     """
     target = module_defs.get(name) or imports.get(name)
     if target is None:
@@ -104,6 +113,7 @@ def _resolve_type_name(
                 target = f"{base}.{rest}"
     if target is None:
         return None
+    target = follow_reexports(target, all_ids, reexports)
     sym = by_id.get(target)
     return target if sym is not None and sym.kind is SymbolKind.CLASS else None
 
