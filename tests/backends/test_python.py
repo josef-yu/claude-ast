@@ -99,3 +99,37 @@ def test_end_to_end_python_source_is_queryable(tmp_path):
     assert [d.id for d in index.find_definition("auth.User")] == ["auth.User"]
     outline_ids = {e.id for e in index.outline("auth")}
     assert {"auth", "auth.authenticate", "auth.User", "auth.User.save"} <= outline_ids
+
+
+def test_binding_same_module_call_and_inheritance(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "def helper():\n    ...\n\n\n"
+        "class Base:\n    ...\n\n\n"
+        "class User(Base):\n    def act(self):\n        helper()\n"
+    )
+    index = Index.build(tmp_path)
+
+    assert "m.User.act" in {r.id for r in index.find_callers("m.helper")}
+    assert ("m.Base", "inherits") in {(r.id, r.kind) for r in index.find_dependencies("m.User")}
+    assert all(r.tier == "definite" for r in index.find_callers("m.helper"))  # syntactic = high
+
+
+def test_binding_resolves_a_cross_file_import(tmp_path):
+    (tmp_path / "models.py").write_text("class User:\n    ...\n")
+    (tmp_path / "svc.py").write_text(
+        "from models import User\n\n\ndef make():\n    return User()\n"
+    )
+    index = Index.build(tmp_path)
+
+    # `User()` in svc.make binds cross-file to models.User via the import
+    assert "svc.make" in {r.id for r in index.find_callers("models.User")}
+
+
+def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "def run():\n    ...\n\n\n"
+        "def go(run):\n    run()\n"  # `run` is the parameter, not m.run
+    )
+    index = Index.build(tmp_path)
+
+    assert index.find_callers("m.run") == []

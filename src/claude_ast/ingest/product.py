@@ -37,6 +37,10 @@ class FileIndex:
     module: SymbolId
     symbols: list[Symbol]
     refs: list[RawRef] = field(default_factory=list)
+    # Local name -> target qualname, a backend's alias map used when binding refs
+    # that came from another module (e.g. Python imports). Backend-specific in
+    # content, generic in shape.
+    imports: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

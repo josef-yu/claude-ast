@@ -11,9 +11,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from .ingest import Indexer, ingest_project
+from .ingest import Indexer, default_indexers, ingest_project
 from .model import Graph
-from .query import Definition, OutlineEntry, find_definition, outline
+from .query import (
+    Definition,
+    OutlineEntry,
+    Reference,
+    find_callers,
+    find_definition,
+    find_dependencies,
+    find_references,
+    outline,
+)
 
 
 class Index:
@@ -23,16 +32,25 @@ class Index:
 
     @classmethod
     def build(cls, root: Path, indexers: Sequence[Indexer] | None = None) -> Index:
-        """Ingest a project and assemble its Graph.
+        """Ingest a project and assemble its Graph — symbols, then edges.
 
-        This increment adds symbols only; the reference/edge layer (and the
-        resolver stack) populate edges next.
+        Symbols are added neutrally; edges come from each backend's own
+        (backend-scoped) ``resolve``. P2's resolver stack extends the edges with
+        type-dependent, confidence-graded ones.
         """
-        result = ingest_project(root, indexers)
+        backends = tuple(indexers) if indexers is not None else default_indexers()
+        result = ingest_project(root, backends)
+
         graph = Graph()
         for file_index in result.files:
             for symbol in file_index.symbols:
                 graph.add_symbol(symbol)
+        for backend in backends:
+            backend_files = [
+                fi for fi in result.files if Path(fi.path).suffix in backend.extensions
+            ]
+            for edge in backend.resolve(backend_files):
+                graph.add_edge(edge)
         return cls(graph, root)
 
     def find_definition(self, name: str) -> list[Definition]:
@@ -40,3 +58,12 @@ class Index:
 
     def outline(self, module: str) -> list[OutlineEntry]:
         return outline(self.graph, module)
+
+    def find_callers(self, symbol: str) -> list[Reference]:
+        return find_callers(self.graph, symbol)
+
+    def find_references(self, symbol: str) -> list[Reference]:
+        return find_references(self.graph, symbol)
+
+    def find_dependencies(self, symbol: str) -> list[Reference]:
+        return find_dependencies(self.graph, symbol)

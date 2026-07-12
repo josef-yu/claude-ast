@@ -34,6 +34,14 @@ def main(argv: list[str] | None = None) -> int:
     p_outline.add_argument("module", help="module id, e.g. pkg.mod")
     p_outline.add_argument("path", nargs="?", default=".", help="project root (default: .)")
 
+    p_callers = sub.add_parser("callers", help="who calls a symbol")
+    p_callers.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
+    p_callers.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+
+    p_deps = sub.add_parser("deps", help="what a symbol uses")
+    p_deps.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
+    p_deps.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+
     sub.add_parser("status", help="show index freshness")
 
     args = parser.parse_args(argv)
@@ -44,6 +52,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_def(args.name, Path(args.path))
     if args.command == "outline":
         return _cmd_outline(args.module, Path(args.path))
+    if args.command == "callers":
+        return _cmd_relations(args.symbol, Path(args.path), "callers")
+    if args.command == "deps":
+        return _cmd_relations(args.symbol, Path(args.path), "deps")
     if args.command == "status":
         print("claude-ast: 'status' is not implemented yet (P1).", file=sys.stderr)
         return 1
@@ -98,6 +110,23 @@ def _cmd_outline(module: str, root: Path) -> int:
         label = e.signature or f"{e.kind} {e.name}"
         doc = f"    # {e.doc}" if e.doc else ""
         print(f"{indent}{label}{doc}")
+    return 0
+
+
+def _cmd_relations(symbol: str, root: Path, which: str) -> int:
+    if not root.exists():
+        print(f"claude-ast: path not found: {root}", file=sys.stderr)
+        return 2
+
+    index = Index.build(root)
+    refs = index.find_callers(symbol) if which == "callers" else index.find_dependencies(symbol)
+    if not refs:
+        verb = "callers of" if which == "callers" else "dependencies for"
+        print(f"no {verb} {symbol!r}", file=sys.stderr)
+        return 1
+    for r in refs:
+        loc = f"{r.at.file}:{r.at.line}  " if r.at else ""
+        print(f"{loc}[{r.tier}] {r.kind:<9} {r.id}")
     return 0
 
 
