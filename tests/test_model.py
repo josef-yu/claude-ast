@@ -66,3 +66,22 @@ def test_symbols_scoped_by_file():
     g.add_symbol(Symbol("m.a", "a", SymbolKind.FUNCTION, Span("m.py", 1)))
     g.add_symbol(Symbol("n.b", "b", SymbolKind.FUNCTION, Span("n.py", 1)))
     assert [s.id for s in g.symbols_in_file("m.py")] == ["m.a"]
+
+
+def test_external_nodes_are_edge_sinks_not_indexed_symbols():
+    # An EXTERNAL target is addressable as an edge dst but must stay out of
+    # enumeration, name lookup, and the indexed-symbol count.
+    g = Graph()
+    g.add_symbol(Symbol("m.f", "f", SymbolKind.FUNCTION, Span("m.py", 1)))
+    g.add_external(Symbol("os.path.join", "join", SymbolKind.EXTERNAL, Span("<external>", 0)))
+    g.add_edge(Edge("m.f", "os.path.join", EdgeKind.CALL, Resolution.syntactic()))
+
+    assert g.symbol("os.path.join") is not None and g.is_external("os.path.join")
+    assert [s.id for s in g.symbols()] == ["m.f"]  # enumeration excludes externals
+    assert g.by_name("join") == []                  # name lookup excludes externals
+    assert len(g) == 1                              # externals are not indexed symbols
+    # the edge still points at it
+    assert [e.dst for e in g.out_edges("m.f")] == ["os.path.join"]
+
+    g.add_external(Symbol("os.path.join", "join", SymbolKind.EXTERNAL, Span("<external>", 0)))
+    assert [s.id for s in g.externals()] == ["os.path.join"]  # idempotent

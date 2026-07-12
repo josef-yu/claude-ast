@@ -14,12 +14,11 @@ against the second implementation, not invented before the first.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Protocol
 
-from ..model import Edge
-from .product import FileIndex
+from .product import FileIndex, ResolveResult
 
 DEFAULT_EXCLUDE: frozenset[str] = frozenset(
     {
@@ -53,11 +52,15 @@ class Indexer(Protocol):
         """Parse in-memory source (the watcher path, source already in hand)."""
         ...
 
-    def resolve(self, files: Sequence[FileIndex]) -> Iterable[Edge]:
-        """Bind this backend's raw references into resolved edges.
+    def resolve(self, files: Sequence[FileIndex]) -> ResolveResult:
+        """Bind this backend's raw references into resolved edges plus the external
+        (library/stdlib) target nodes those edges reference.
 
         Backend-scoped: it only sees its own files and only produces edges
         between its own (namespaced) symbol ids, so backends never cross-bind.
+        References whose target is outside the indexed project become edges to
+        ``EXTERNAL`` nodes the backend mints (its own id scheme) rather than being
+        dropped.
         """
         ...
 

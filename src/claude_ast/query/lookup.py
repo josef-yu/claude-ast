@@ -40,10 +40,14 @@ def find_definition(graph: Graph, name: str) -> list[Definition]:
 
     A fully-qualified id (``auth.models.User``) matches exactly; a bare name
     (``User``) returns every symbol with that short name. Definitions are
-    syntactic and certain, so results are not tiered.
+    syntactic and certain, so results are not tiered. External (library/stdlib)
+    nodes are excluded — they have no in-tree definition to point at.
     """
     exact = graph.symbol(name)
-    matches = [exact] if exact is not None else graph.by_name(name)
+    if exact is not None and not graph.is_external(exact.id):
+        matches = [exact]
+    else:
+        matches = graph.by_name(name)  # bare-name lookup; by_name never holds externals
     return [Definition(s.id, s.kind.value, s.span, s.signature) for s in matches]
 
 

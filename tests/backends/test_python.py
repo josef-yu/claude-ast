@@ -160,6 +160,30 @@ def test_binding_resolves_a_cross_file_import(tmp_path):
     assert "svc.make" in {r.id for r in index.find_callers("models.User")}
 
 
+def test_external_import_call_becomes_a_definite_external_edge(tmp_path):
+    # A call to a from-imported stdlib name is not dropped: it binds to an
+    # EXTERNAL node as a `definite` dependency (the reference genuinely exists).
+    (tmp_path / "m.py").write_text(
+        "from os.path import join\n\n\ndef build(name):\n    return join('/tmp', name)\n"
+    )
+    index = Index.build(tmp_path)
+
+    ext = [d for d in index.find_dependencies("m.build") if d.id == "os.path.join"]
+    assert ext and ext[0].kind == "call" and ext[0].tier == "definite" and ext[0].external
+    assert index.graph.is_external("os.path.join")
+    # external targets are edge sinks, never definitions or ranked skeleton entries
+    assert index.find_definition("os.path.join") == []
+    assert "os.path.join" not in {e.id for e in index.repo_map(budget=500)}
+
+
+def test_external_base_class_becomes_an_external_inherits_edge(tmp_path):
+    (tmp_path / "m.py").write_text("from abc import ABC\n\n\nclass Plugin(ABC):\n    ...\n")
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.kind, d.external) for d in index.find_dependencies("m.Plugin")}
+    assert ("abc.ABC", "inherits", True) in deps
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"

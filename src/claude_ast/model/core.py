@@ -70,6 +70,7 @@ class SymbolKind(StrEnum):
     METHOD = "method"
     VARIABLE = "variable"
     PARAMETER = "parameter"
+    EXTERNAL = "external"  # a library/stdlib target referenced but not indexed (no in-tree source)
 
 
 class EdgeKind(StrEnum):

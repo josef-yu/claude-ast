@@ -7,7 +7,7 @@ high-confidence base.  [P1]
 """
 
 from .base import DEFAULT_EXCLUDE, Indexer, iter_source_files
-from .product import FileIndex, ProjectIngest, RawRef
+from .product import FileIndex, ProjectIngest, RawRef, ResolveResult
 from .project import default_indexers, ingest_project
 from .python import PythonIndexer
 
@@ -18,6 +18,7 @@ __all__ = [
     "ProjectIngest",
     "PythonIndexer",
     "RawRef",
+    "ResolveResult",
     "default_indexers",
     "ingest_project",
     "iter_source_files",

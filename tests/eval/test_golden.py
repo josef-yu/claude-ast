@@ -75,6 +75,21 @@ def test_repo_map_surfaces_the_most_referenced_symbol(index: Index) -> None:
     assert "sample_pkg.core.hub" in ids
 
 
+def test_external_dependencies_resolve_as_definite_external_edges(index: Index) -> None:
+    path_deps = index.find_dependencies("sample_pkg.externals.build_path")
+    assert ("os.path.join", "call", True) in {(d.id, d.kind, d.external) for d in path_deps}
+    assert all(d.tier == "definite" for d in path_deps)
+
+    base = index.find_dependencies("sample_pkg.externals.Plugin")
+    assert ("abc.ABC", "inherits", True) in {(d.id, d.kind, d.external) for d in base}
+
+
+def test_external_targets_stay_out_of_ranking(index: Index) -> None:
+    # Library nodes are edge sinks, never part of the ranked skeleton.
+    ids = {e.id for e in index.repo_map(budget=1000)}
+    assert "os.path.join" not in ids and "abc.ABC" not in ids
+
+
 def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Persisted round-trip via the snapshot must reproduce the cold-build answers.
     monkeypatch.setenv("CLAUDE_AST_CACHE_DIR", str(tmp_path))

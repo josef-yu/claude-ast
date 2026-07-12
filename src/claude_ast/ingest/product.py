@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..model import EdgeKind, Span, Symbol, SymbolId
+from ..model import Edge, EdgeKind, Span, Symbol, SymbolId
 
 
 @dataclass(slots=True)
@@ -61,3 +61,18 @@ class ProjectIngest:
     skipped: list[str]  # paths we couldn't read/parse (kept out of the index)
     fresh: dict[str, CachedFile]  # newly (re)parsed this run — to persist
     present: set[str]  # every current source path — for pruning deletions
+
+
+@dataclass(slots=True)
+class ResolveResult:
+    """A backend's resolution output: resolved edges plus the external
+    (library/stdlib) target nodes those edges reference.
+
+    Externals are produced here — not persisted per-file — and rebuilt on every
+    graph assembly. The external-id scheme is the backend's own (Python mints a
+    bare qualname; a JS/TS backend may encode package/version, since npm allows
+    several versions to coexist); the neutral model only ever sees ``EXTERNAL``.
+    """
+
+    edges: list[Edge]
+    externals: list[Symbol]

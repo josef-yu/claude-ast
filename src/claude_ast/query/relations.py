@@ -21,6 +21,7 @@ class Reference:
     kind: str
     tier: str  # definite | possible
     at: Span | None
+    external: bool = False  # the other symbol is a library/stdlib node, not in-tree
 
 
 def find_callers(graph: Graph, symbol: SymbolId) -> list[Reference]:
@@ -41,14 +42,15 @@ def find_references(graph: Graph, symbol: SymbolId) -> list[Reference]:
 
 
 def find_dependencies(graph: Graph, symbol: SymbolId) -> list[Reference]:
-    """Everything ``symbol`` uses (all outbound edges)."""
-    return [_ref(e.dst, e) for e in graph.out_edges(symbol)]
+    """Everything ``symbol`` uses (all outbound edges), library/stdlib targets flagged."""
+    return [_ref(e.dst, e, graph.is_external(e.dst)) for e in graph.out_edges(symbol)]
 
 
-def _ref(other: SymbolId, edge: Edge) -> Reference:
+def _ref(other: SymbolId, edge: Edge, external: bool = False) -> Reference:
     return Reference(
         id=other,
         kind=edge.kind.value,
         tier=edge.resolution.confidence.tier,
         at=edge.at,
+        external=external,
     )

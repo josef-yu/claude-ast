@@ -86,6 +86,9 @@ def _cmd_index(root: Path) -> int:
     print(f"indexed {files} files · {len(symbols)} symbols")
     for kind, count in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"  {count:>6}  {kind}")
+    external = sum(1 for _ in index.graph.externals())
+    if external:
+        print(f"  {external:>6}  external targets (library/stdlib)")
     if index.skipped:
         print(f"  skipped {len(index.skipped)} file(s) — unreadable or syntax error")
     return 0
@@ -136,7 +139,8 @@ def _cmd_relations(symbol: str, root: Path, which: str) -> int:
         return 1
     for r in refs:
         loc = f"{r.at.file}:{r.at.line}  " if r.at else ""
-        print(f"{loc}[{r.tier}] {r.kind:<9} {r.id}")
+        ext = "  [external]" if r.external else ""
+        print(f"{loc}[{r.tier}] {r.kind:<9} {r.id}{ext}")
     return 0
 
 

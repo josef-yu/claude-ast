@@ -80,7 +80,10 @@ class Index:
             backend_files = [
                 fi for fi in result.files if Path(fi.path).suffix in backend.extensions
             ]
-            for edge in backend.resolve(backend_files):
+            resolved = backend.resolve(backend_files)
+            for external in resolved.externals:
+                graph.add_external(external)
+            for edge in resolved.edges:
                 graph.add_edge(edge)
         return cls(graph, root, skipped=result.skipped)
 

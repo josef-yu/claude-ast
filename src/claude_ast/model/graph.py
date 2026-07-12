@@ -22,7 +22,7 @@ class Graph:
     what lets incremental invalidation find edges pointing *into* a changed file.
     """
 
-    __slots__ = ("_symbols", "_out", "_in", "_by_file", "_by_name", "_children")
+    __slots__ = ("_symbols", "_out", "_in", "_by_file", "_by_name", "_children", "_externals")
 
     def __init__(self) -> None:
         self._symbols: dict[SymbolId, Symbol] = {}
@@ -33,6 +33,10 @@ class Graph:
         # parent id -> its direct children, in insertion (source) order. This is
         # the structural tree the neutral layer walks instead of parsing ids.
         self._children: dict[SymbolId, list[SymbolId]] = defaultdict(list)
+        # Library/stdlib targets, kept apart from the indexed symbols: addressable
+        # as edge sinks but deliberately absent from enumeration, name-lookup, and
+        # ranking (see add_external). External-id format is a backend concern.
+        self._externals: dict[SymbolId, Symbol] = {}
 
     # --- mutation (single writer) ---
 
@@ -47,13 +51,32 @@ class Graph:
         self._out[edge.src].append(edge)
         self._in[edge.dst].append(edge)
 
+    def add_external(self, sym: Symbol) -> None:
+        """Register a library/stdlib target as an edge sink.
+
+        Kept out of ``_symbols`` on purpose: an external node is *referenced*, not
+        *part of* the codebase, so it must not surface in enumeration (``symbols``),
+        name lookup (``by_name``), the file/child trees, or ranking — only as the
+        ``dst`` an edge points to. Idempotent, so the many refs to one library
+        target collapse to a single node.
+        """
+        self._externals.setdefault(sym.id, sym)
+
     # --- lookup (many readers) ---
 
     def symbol(self, sid: SymbolId) -> Symbol | None:
-        return self._symbols.get(sid)
+        """A symbol by id — indexed first, then external targets (edge sinks)."""
+        return self._symbols.get(sid) or self._externals.get(sid)
+
+    def is_external(self, sid: SymbolId) -> bool:
+        return sid in self._externals
 
     def symbols(self) -> Iterator[Symbol]:
+        """The indexed (in-tree) symbols — externals are excluded by design."""
         return iter(self._symbols.values())
+
+    def externals(self) -> Iterator[Symbol]:
+        return iter(self._externals.values())
 
     def symbols_in_file(self, file: str) -> list[Symbol]:
         return [self._symbols[s] for s in self._by_file.get(file, ())]

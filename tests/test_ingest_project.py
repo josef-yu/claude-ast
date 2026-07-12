@@ -9,8 +9,8 @@ not hardcoded to Python.
 from collections.abc import Sequence
 from pathlib import Path
 
-from claude_ast.ingest import FileIndex, ingest_project, iter_source_files
-from claude_ast.model import Edge, Span, Symbol, SymbolKind
+from claude_ast.ingest import FileIndex, ResolveResult, ingest_project, iter_source_files
+from claude_ast.model import Span, Symbol, SymbolKind
 
 
 class FakeBackend:
@@ -30,8 +30,8 @@ class FakeBackend:
             symbols=[Symbol(sid, sid, SymbolKind.MODULE, Span(str(path), 1))],
         )
 
-    def resolve(self, files: Sequence[FileIndex]) -> list[Edge]:
-        return []
+    def resolve(self, files: Sequence[FileIndex]) -> ResolveResult:
+        return ResolveResult(edges=[], externals=[])
 
 
 def test_iter_source_files_skips_excluded_dirs(tmp_path):

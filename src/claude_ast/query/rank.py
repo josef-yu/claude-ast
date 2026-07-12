@@ -35,13 +35,16 @@ def pagerank(
         return {}
 
     teleport = _teleport(graph, ids, focus)
+    internal = set(ids)  # externals are excluded from graph.symbols(), so not ranked
     adjacency: dict[SymbolId, list[tuple[SymbolId, float]]] = {}
     out_weight: dict[SymbolId, float] = {}
     for i in ids:
+        # Edges to EXTERNAL sinks carry no importance (and aren't ranked nodes), so
+        # they neither flow rank nor count toward this node's out-weight.
         pairs = [
             (e.dst, _WEIGHT[e.resolution.confidence])
             for e in graph.out_edges(i)
-            if e.kind in _RANK_KINDS
+            if e.kind in _RANK_KINDS and e.dst in internal
         ]
         adjacency[i] = pairs
         out_weight[i] = sum(w for _, w in pairs)
