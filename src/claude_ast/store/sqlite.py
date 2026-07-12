@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 6  # RawRef.local_root — value-rooted receiver refs now captured for the resolvers
+_SCHEMA_VERSION = 7  # RawRef.receiver_type — parameter-annotation types for the annotation resolver
 
 
 class SqliteStore(Store):

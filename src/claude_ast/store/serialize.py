@@ -70,7 +70,9 @@ def _symbol(v: dict) -> Symbol:
 def _ref_d(r: RawRef) -> dict[str, object]:
     d: dict[str, object] = {"s": r.src, "k": r.kind.value, "n": r.name, "a": _span_d(r.at)}
     if r.local_root:
-        d["l"] = 1  # omit when false to keep the common-case blob small
+        d["l"] = 1  # omit when false/absent to keep the common-case blob small
+    if r.receiver_type is not None:
+        d["rt"] = r.receiver_type
     return d
 
 
@@ -81,4 +83,5 @@ def _ref(v: dict) -> RawRef:
         name=v["n"],
         at=_span(v["a"]),
         local_root=bool(v.get("l")),
+        receiver_type=v.get("rt"),
     )

@@ -108,6 +108,12 @@ def test_self_call_resolves_through_a_cross_file_base(index: Index) -> None:
     assert all(r.tier == "possible" for r in callers)
 
 
+def test_annotated_receiver_resolves_to_the_typed_method(index: Index) -> None:
+    # `service: Service` -> `service.run()` binds to Service.run at the possible tier.
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.service.handle")}
+    assert ("sample_pkg.service.Service.run", "call", "possible") in deps
+
+
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:
     # Library nodes are edge sinks, never part of the ranked skeleton.
     ids = {e.id for e in index.repo_map(budget=1000)}

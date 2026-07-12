@@ -18,3 +18,8 @@ class Service(Base):
 def start() -> int:
     """Entry point that calls the hub."""
     return hub()
+
+
+def handle(service: Service) -> int:
+    """Annotated receiver: `service: Service` -> Service.run at the possible tier."""
+    return service.run()

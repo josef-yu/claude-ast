@@ -24,7 +24,9 @@ class RawRef:
     ``local_root`` marks a value receiver — the root name is a local (``self``,
     a parameter, a local var) — which syntactic binding must *never* touch (a
     local can shadow an import, so binding it would forge a wrong edge); these
-    are left for the type resolvers, which know the receiver's type.
+    are left for the type resolvers. ``receiver_type`` is the receiver's annotated
+    type name (``User``, ``models.User``) when a parameter annotation gives it —
+    the fact the annotation resolver binds; ``None`` when there is no such fact.
     """
 
     src: SymbolId  # the enclosing symbol making the reference
@@ -32,6 +34,7 @@ class RawRef:
     name: str
     at: Span
     local_root: bool = False
+    receiver_type: str | None = None
 
 
 @dataclass(slots=True)

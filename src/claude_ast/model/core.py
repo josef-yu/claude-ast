@@ -74,6 +74,16 @@ class Resolution:
         """
         return cls(ResolutionSource.INFERENCE, Confidence.MEDIUM)
 
+    @classmethod
+    def annotated(cls) -> Resolution:
+        """A receiver typed by a PEP 484 annotation (``u: User`` -> ``User.save``).
+
+        MEDIUM/possible: an annotation may name a supertype / Protocol / ABC while the
+        runtime instance is a subclass overriding the member, so the named target may
+        not be the one actually called.
+        """
+        return cls(ResolutionSource.ANNOTATION, Confidence.MEDIUM)
+
 
 class SymbolKind(StrEnum):
     MODULE = "module"

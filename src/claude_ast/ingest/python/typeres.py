@@ -1,15 +1,19 @@
 """Type resolvers — value-typed reference resolution behind the Python backend.
 
-The first, always-safe value resolver: ``self.m()`` -> the enclosing class's member
-``m`` (or an in-tree base's). It needs no type-name resolution — ``self``'s type is
-the enclosing class, reached structurally via ``parent``/member adjacency, never by
-parsing the dotted id. It emits a single MEDIUM (``possible``) edge: the statically
-named member is real, but a subclass may override it at runtime, so the edge is
-honestly possible, not definite — the payoff of "report, don't rule".
+Two value resolvers, sharing one member lookup:
 
-Plain functions, not a Resolver protocol/pipeline: with one value resolver there is
-no abstraction to validate yet. The annotation/inference/stub resolvers land later;
-the shared shape (a member lookup) is factored only when the second one proves it.
+- ``self.m()``  -> the enclosing class's member (``self``'s type is that class,
+  reached structurally via ``parent``/member adjacency, never by parsing the id).
+- ``u.m()`` with ``u: User`` -> ``User.m`` (the parameter's declared type, resolved
+  through the file's imports/defs like any name).
+
+Each emits a single MEDIUM (``possible``) edge: the statically named member is real,
+but a subclass may override it at runtime, so the edge is honestly possible, not
+definite — the payoff of "report, don't rule".
+
+Plain functions sharing ``_member_lookup``, not a Resolver protocol/pipeline: the two
+resolvers validate the shared *member lookup*, not a uniform resolver interface, so no
+registry/pipeline is invented before the stub/inference resolvers prove one is needed.
 
 Known limitation: a ``@staticmethod`` whose first parameter is literally named ``self``
 is indistinguishable from an instance method here (``symbols.py`` records no decorators),
@@ -25,13 +29,16 @@ from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
 
 
-def resolve_self(files: Sequence[FileIndex], edges: Sequence[Edge]) -> list[Edge]:
-    """Bind ``self.<attr>()`` refs to the enclosing class's member (own, then in-tree bases).
+def resolve_value_types(files: Sequence[FileIndex], edges: Sequence[Edge]) -> list[Edge]:
+    """Resolve value-typed receiver calls to MEDIUM (``possible``) edges — the two ways a
+    receiver's type is statically known:
 
-    ``edges`` is the syntactic pass's output — its INHERITS edges give the in-tree base
-    classes, so this must run *after* syntactic binding. Only ``local_root`` refs (value
-    receivers) are considered; a receiver other than ``self``, a chained receiver
-    (``self.repo.save``), or a call outside an instance method yields no edge.
+    - ``self.m()`` -> the enclosing class's member (INFERENCE); ``self`` *is* that class.
+    - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type.
+
+    Both share one member lookup (own member, then in-tree bases). Runs after syntactic
+    binding so the INHERITS edges the base walk needs are already in ``edges``. Only
+    ``local_root`` refs are considered, single attribute only (chained ``a.b.c`` deferred).
     """
     by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
     members = _members(files)
@@ -39,22 +46,66 @@ def resolve_self(files: Sequence[FileIndex], edges: Sequence[Edge]) -> list[Edge
 
     out: list[Edge] = []
     for fi in files:
+        module_defs: dict[str, str] = {}
+        for s in fi.symbols:
+            if s.parent == fi.module:
+                module_defs.setdefault(s.name, s.id)
         for ref in fi.refs:
             if not ref.local_root:
                 continue
             root, _, attr = ref.name.partition(".")
-            if root != "self" or not attr or "." in attr:
-                continue  # only `self.<attr>` with a single attribute this increment
-            method = by_id.get(ref.src)
-            if method is None or method.kind is not SymbolKind.METHOD:
-                continue  # not inside a method (nested function, module scope) -> no instance
-            cls = by_id.get(method.parent) if method.parent else None
-            if cls is None or cls.kind is not SymbolKind.CLASS:
+            if not attr or "." in attr:
+                continue  # single attribute only
+            if root == "self":
+                class_id = _self_class(ref.src, by_id)
+                resolution = Resolution.inferred()
+            elif ref.receiver_type is not None:
+                class_id = _resolve_type_name(ref.receiver_type, module_defs, fi.imports, by_id)
+                resolution = Resolution.annotated()
+            else:
+                continue  # a value receiver we can't type yet (unannotated non-self)
+            if class_id is None:
                 continue
-            target = _member_lookup(cls.id, attr, members, bases)
+            target = _member_lookup(class_id, attr, members, bases)
             if target is not None:
-                out.append(Edge(ref.src, target, ref.kind, Resolution.inferred(), ref.at))
+                out.append(Edge(ref.src, target, ref.kind, resolution, ref.at))
     return out
+
+
+def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None:
+    """The class ``self`` denotes: the class enclosing the method that made the ref, or
+    None when the ref isn't inside an instance method (nested function, module scope)."""
+    method = by_id.get(src)
+    if method is None or method.kind is not SymbolKind.METHOD:
+        return None
+    cls = by_id.get(method.parent) if method.parent else None
+    return cls.id if cls is not None and cls.kind is SymbolKind.CLASS else None
+
+
+def _resolve_type_name(
+    name: str,
+    module_defs: dict[str, str],
+    imports: dict[str, str],
+    by_id: dict[SymbolId, Symbol],
+) -> SymbolId | None:
+    """A type name in a file's scope -> its in-tree CLASS id, or None.
+
+    Resolves a bare or dotted annotation name (``User``, ``models.User``) through the
+    file's own definitions and imports — the same inputs syntactic binding uses — and
+    keeps it only if it lands on an in-tree class. An external or non-class target is
+    None: the members of an unindexed class can't be looked up here.
+    """
+    target = module_defs.get(name) or imports.get(name)
+    if target is None:
+        root, _, rest = name.partition(".")
+        if rest:
+            base = module_defs.get(root) or imports.get(root)
+            if base is not None:
+                target = f"{base}.{rest}"
+    if target is None:
+        return None
+    sym = by_id.get(target)
+    return target if sym is not None and sym.kind is SymbolKind.CLASS else None
 
 
 # A value CALL must resolve to something callable — a method, a nested function, or a

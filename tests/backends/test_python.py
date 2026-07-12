@@ -334,6 +334,53 @@ def test_match_capture_name_is_a_local_receiver_not_an_import(tmp_path):
     assert not index.graph.is_external("os.getcwd.write")
 
 
+def test_annotated_param_receiver_resolves_to_the_typed_class(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def store(u: User):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("m.store")}
+    assert ("m.User.save", "call", "possible") in deps
+    # sourced ANNOTATION (vs INFERENCE for a self-call)
+    edge = next(e for e in index.graph.out_edges("m.store") if e.dst == "m.User.save")
+    assert edge.resolution.source.value == "annotation"
+
+
+def test_annotated_param_resolves_cross_file(tmp_path):
+    (tmp_path / "models.py").write_text("class User:\n    def save(self):\n        ...\n")
+    (tmp_path / "m.py").write_text(
+        "from models import User\n\n\ndef store(u: User):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    assert ("models.User.save", "possible") in {
+        (d.id, d.tier) for d in index.find_dependencies("m.store")
+    }
+
+
+def test_external_or_unknown_annotation_yields_no_edge(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "from os import PathLike\n\n\n"
+        "def a(p: PathLike):\n    return p.foo()\n\n\n"  # external type -> no edge
+        "def b(x: Missing):\n    return x.bar()\n"        # undefined type -> no edge
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.a") == []
+    assert index.find_dependencies("m.b") == []
+
+
+def test_subscripted_annotation_is_deferred(tmp_path):
+    # `list[User]` is a subscript -> no receiver_type -> deferred, never a false edge.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def store(us: list[User]):\n    return us.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.store") == []
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"
