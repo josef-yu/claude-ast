@@ -33,13 +33,14 @@ from .binding import follow_reexports
 def resolve_value_types(
     files: Sequence[FileIndex], edges: Sequence[Edge], reexports: dict[str, dict[str, str]]
 ) -> list[Edge]:
-    """Resolve value-typed receiver calls to MEDIUM (``possible``) edges — the two ways a
+    """Resolve value-typed receiver calls to MEDIUM (``possible``) edges — the ways a
     receiver's type is statically known:
 
     - ``self.m()`` -> the enclosing class's member (INFERENCE); ``self`` *is* that class.
     - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type.
+    - ``x.m()`` after ``x = User()`` -> ``User.m`` (INFERENCE); the constructed type.
 
-    Both share one member lookup (own member, then in-tree bases). Runs after syntactic
+    All share one member lookup (own member, then in-tree bases). Runs after syntactic
     binding so the INHERITS edges the base walk needs are already in ``edges``. Only
     ``local_root`` refs are considered, single attribute only (chained ``a.b.c`` deferred).
     """
@@ -67,7 +68,9 @@ def resolve_value_types(
                 class_id = _resolve_type_name(
                     ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
                 )
-                resolution = Resolution.annotated()
+                resolution = (
+                    Resolution.inferred() if ref.receiver_inferred else Resolution.annotated()
+                )
             else:
                 continue  # a value receiver we can't type yet (unannotated non-self)
             if class_id is None:
@@ -156,10 +159,11 @@ def _member_lookup(
 ) -> SymbolId | None:
     """``attr`` on ``class_id``: the class's own member wins; otherwise the attribute must
     resolve to exactly ONE member across its in-tree bases. A class that defines ``attr``
-    shadows its own bases, so a normal override chain resolves to the nearest definition;
-    but if two bases on different branches define it, the real target is MRO-dependent, so
-    we emit nothing rather than guess a possibly-wrong one (report, don't rule). A cycle
-    guard makes the base walk total.
+    shadows its own bases, so a normal (single-inheritance) override chain resolves to the
+    nearest definition. If two in-tree bases on *different* branches define it, we DECLINE —
+    this does not compute the C3 MRO (which would pick one deterministically), so we emit
+    nothing rather than guess. That is an honest miss, never a wrong edge; computing the real
+    MRO is a future refinement. A cycle guard makes the base walk total.
     """
     own = members.get(class_id, {}).get(attr)
     if own is not None:

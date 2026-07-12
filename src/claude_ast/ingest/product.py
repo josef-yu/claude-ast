@@ -24,9 +24,11 @@ class RawRef:
     ``local_root`` marks a value receiver — the root name is a local (``self``,
     a parameter, a local var) — which syntactic binding must *never* touch (a
     local can shadow an import, so binding it would forge a wrong edge); these
-    are left for the type resolvers. ``receiver_type`` is the receiver's annotated
-    type name (``User``, ``models.User``) when a parameter annotation gives it —
-    the fact the annotation resolver binds; ``None`` when there is no such fact.
+    are left for the type resolvers. ``receiver_type`` is the receiver's static type
+    name (``User``, ``models.User``) when known — from a parameter annotation or a
+    local ``x = Foo()`` construction — the fact the type resolvers bind; ``None`` when
+    there is no such fact. ``receiver_inferred`` distinguishes the source: True for a
+    construction inference (``INFERENCE``), False for a declared annotation.
     """
 
     src: SymbolId  # the enclosing symbol making the reference
@@ -35,6 +37,7 @@ class RawRef:
     at: Span
     local_root: bool = False
     receiver_type: str | None = None
+    receiver_inferred: bool = False
 
 
 @dataclass(slots=True)

@@ -23,3 +23,9 @@ def start() -> int:
 def handle(service: Service) -> int:
     """Annotated receiver: `service: Service` -> Service.run at the possible tier."""
     return service.run()
+
+
+def bootstrap() -> int:
+    """Construction inference: `s = Service()` -> Service.run at the possible tier."""
+    s = Service()
+    return s.run()

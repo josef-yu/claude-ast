@@ -16,10 +16,11 @@ regardless of *how* the index was populated.
 language maps to the model, plus one end-to-end pass (parse → assemble → query)
 for that backend.
 
-- `backends/test_python.py` — the Python backend
+- `backends/python/` — the Python backend, split by concern (see below)
 
-Adding a language backend = add `backends/test_<language>.py`. The neutral tests
-are untouched — if any of them needs a real backend to pass, it isn't neutral.
+Adding a language backend = add `backends/test_<language>.py` (promote to a
+`backends/<language>/` package once it grows). The neutral tests are untouched —
+if any of them needs a real backend to pass, it isn't neutral.
 
 ## When a backend file gets crowded
 

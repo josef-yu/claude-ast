@@ -73,6 +73,8 @@ def _ref_d(r: RawRef) -> dict[str, object]:
         d["l"] = 1  # omit when false/absent to keep the common-case blob small
     if r.receiver_type is not None:
         d["rt"] = r.receiver_type
+    if r.receiver_inferred:
+        d["ri"] = 1
     return d
 
 
@@ -84,4 +86,5 @@ def _ref(v: dict) -> RawRef:
         at=_span(v["a"]),
         local_root=bool(v.get("l")),
         receiver_type=v.get("rt"),
+        receiver_inferred=bool(v.get("ri")),
     )

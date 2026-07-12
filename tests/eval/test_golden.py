@@ -114,6 +114,12 @@ def test_annotated_receiver_resolves_to_the_typed_method(index: Index) -> None:
     assert ("sample_pkg.service.Service.run", "call", "possible") in deps
 
 
+def test_constructed_receiver_resolves_via_inference(index: Index) -> None:
+    # `s = Service()` -> `s.run()` binds to Service.run at the possible tier.
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.service.bootstrap")}
+    assert ("sample_pkg.service.Service.run", "call", "possible") in deps
+
+
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:
     # Library nodes are edge sinks, never part of the ranked skeleton.
     ids = {e.id for e in index.repo_map(budget=1000)}
@@ -139,3 +145,9 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     save_callers = {"sample_pkg.core.Base.persist", "sample_pkg.service.Service.store"}
     assert callers(cold_index, "sample_pkg.core.Base.save") == save_callers
     assert callers(warm_index, "sample_pkg.core.Base.save") == save_callers
+
+    # ...and the annotation (handle) + construction-inference (bootstrap) edges, which
+    # survive only if receiver_type AND receiver_inferred round-trip through the store.
+    run_callers = {"sample_pkg.service.handle", "sample_pkg.service.bootstrap"}
+    assert callers(cold_index, "sample_pkg.service.Service.run") == run_callers
+    assert callers(warm_index, "sample_pkg.service.Service.run") == run_callers

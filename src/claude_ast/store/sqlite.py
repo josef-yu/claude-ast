@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 8  # relative imports now resolved into the import map (changes stored imports)
+_SCHEMA_VERSION = 10  # module/class-scope shadow guard + nested-scope type-env pruning changed refs
 
 
 class SqliteStore(Store):

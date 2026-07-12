@@ -10,9 +10,10 @@ plus a module-level *import map* (local name -> target qualname) used later to
 bind names that came from another module. Attribute chains rooted at a *local*
 value (``self.save()``, ``u.save()``) are recorded with ``local_root=True`` — kept
 OUT of syntactic binding (a local root may shadow an import, so binding it would
-forge a wrong edge) and left for the P2 type resolvers. When a parameter annotation
-gives the receiver's type in scope, the ref also carries it (``receiver_type``) so
-the annotation resolver can bind it. A bare local call (``x()``) is still skipped.
+forge a wrong edge) and left for the P2 type resolvers. When the receiver's type is
+known in scope — a parameter annotation or a local ``x = Foo()`` construction — the
+ref carries it (``receiver_type``, with ``receiver_inferred`` telling the two apart)
+so the type resolvers can bind it. A bare local call (``x()``) is still skipped.
 
 Scope handling is conservative in service of honest confidence: before binding a
 bare name we skip it if it is bound as a local anywhere in an enclosing function
@@ -37,7 +38,9 @@ def extract_refs(
     tree: ast.Module, module: str, path: str, node_ids: dict[ast.AST, str]
 ) -> tuple[list[RawRef], dict[str, str]]:
     refs: list[RawRef] = []
-    _visit(tree, module, path, refs, [], {}, node_ids)
+    # Module-body value binders shadow-protect module-scope value receivers, just as a
+    # function's locals do inside it (a `for json in ...` must not bind through `import json`).
+    _visit(tree, module, path, refs, [_binder_names(tree.body)], {}, node_ids)
     return refs, _collect_imports(tree, _package(module, path))
 
 
@@ -47,7 +50,7 @@ def _visit(
     path: str,
     refs: list[RawRef],
     locals_: list[frozenset[str]],
-    types: dict[str, str],
+    types: dict[str, tuple[str, bool]],  # local name -> (type name, from-inference?)
     node_ids: dict[ast.AST, str],
 ) -> None:
     if isinstance(node, ast.ClassDef):
@@ -68,8 +71,12 @@ def _visit(
                 _visit(base, enclosing, path, refs, locals_, types, node_ids)  # e.g. Generic[T]
         for kw in node.keywords:
             _visit(kw.value, enclosing, path, refs, locals_, types, node_ids)
+        # class-body value binders shadow-protect receivers in the body (a class var
+        # named like an import must not bind through it) — parent==class VARIABLEs are
+        # absent from module_defs, so without this they would forge a definite edge.
+        class_locals = [*locals_, _binder_names(node.body)]
         for stmt in node.body:
-            _visit(stmt, cid, path, refs, locals_, types, node_ids)
+            _visit(stmt, cid, path, refs, class_locals, types, node_ids)
         return
 
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
@@ -86,9 +93,17 @@ def _visit(
         if node.returns is not None:
             _visit(node.returns, enclosing, path, refs, locals_, types, node_ids)
         # the body runs in the function's own scope: its locals shadow module names, and
-        # its parameter annotations extend the receiver-type map (inner shadows outer).
-        inner = [*locals_, _function_locals(node)]
-        inner_types = {**types, **_annotated_types(node)}
+        # its parameter annotations + local constructions extend the receiver-type map.
+        # A name this scope rebinds drops the outer type (an untyped shadow must not inherit
+        # a stale annotation); precedence: a declared annotation beats an inferred
+        # `x = Foo()`, both beat an outer-scope type that survives (a genuine closure read).
+        fn_locals = _function_locals(node)
+        inner = [*locals_, fn_locals]
+        inner_types = {
+            **{n: v for n, v in types.items() if n not in fn_locals},
+            **{name: (t, True) for name, t in _inferred_types(node).items()},
+            **{name: (t, False) for name, t in _annotated_types(node).items()},
+        }
         for stmt in node.body:
             _visit(stmt, fid, path, refs, inner, inner_types, node_ids)
         return
@@ -102,7 +117,8 @@ def _visit(
             elif "." in callee:
                 # value receiver (self.save(), u.save()): record for the type resolvers,
                 # flagged so syntactic binding never mis-resolves a shadowing local, and
-                # stamped with the receiver's annotated type when one is in scope.
+                # stamped with the receiver's type (annotated or inferred) when known.
+                rtype, rinferred = types.get(root, (None, False))
                 refs.append(
                     RawRef(
                         enclosing,
@@ -110,7 +126,8 @@ def _visit(
                         callee,
                         span(path, node.func),
                         local_root=True,
-                        receiver_type=types.get(root),
+                        receiver_type=rtype,
+                        receiver_inferred=rinferred,
                     )
                 )
 
@@ -157,6 +174,35 @@ def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, st
     return types
 
 
+def _inferred_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+    """Local name -> the type it is constructed from (``x = User()`` -> ``x: User``), for
+    the inference resolver.
+
+    Flow-insensitive and conservative: a name assigned from more than one distinct
+    constructor is *dropped* (ambiguous — don't guess). The candidate is the callee name;
+    the resolver keeps it only if it resolves to a class (``x = helper()`` where helper is
+    a function yields no edge). Nested scopes are not descended; reassignment and
+    non-construction RHS (``x = other()``) are deferred to a flow-sensitive resolver.
+    """
+    candidates: dict[str, set[str]] = {}
+
+    def scan(node: ast.AST) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            return  # a separate scope — its assignments are not this function's
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            ctor = _dotted_name(node.value.func)
+            if ctor is not None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        candidates.setdefault(target.id, set()).add(ctor)
+        for child in ast.iter_child_nodes(node):
+            scan(child)
+
+    for stmt in fn.body:
+        scan(stmt)
+    return {name: next(iter(ctors)) for name, ctors in candidates.items() if len(ctors) == 1}
+
+
 def _all_args(args: ast.arguments) -> list[ast.arg]:
     result = [*args.posonlyargs, *args.args, *args.kwonlyargs]
     if args.vararg is not None:
@@ -191,6 +237,28 @@ def _function_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
     for stmt in fn.body:
         process(stmt)
     return frozenset(names - declared_outer)
+
+
+def _binder_names(body: list[ast.stmt]) -> frozenset[str]:
+    """Names value-bound in a module or class body — assignment / for / with / except /
+    comprehension / walrus / match targets — used to shadow-protect value receivers at
+    module and class scope, as ``_function_locals`` does inside functions. Imports are
+    excluded (they are resolution targets, not shadows); nested scopes are not descended.
+    """
+    names: set[str] = set()
+
+    def process(node: ast.AST) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            return  # a separate scope — its bindings are its own
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            return  # a resolution target, not a shadowing local
+        _add_bound(node, names)
+        for child in ast.iter_child_nodes(node):
+            process(child)
+
+    for stmt in body:
+        process(stmt)
+    return frozenset(names)
 
 
 def _add_bound(node: ast.AST, names: set[str]) -> None:
