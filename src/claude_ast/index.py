@@ -17,11 +17,13 @@ from .query import (
     Definition,
     OutlineEntry,
     Reference,
+    RepoMapEntry,
     find_callers,
     find_definition,
     find_dependencies,
     find_references,
     outline,
+    repo_map,
 )
 
 
@@ -67,3 +69,6 @@ class Index:
 
     def find_dependencies(self, symbol: str) -> list[Reference]:
         return find_dependencies(self.graph, symbol)
+
+    def repo_map(self, budget: int = 2000, focus: str | None = None) -> list[RepoMapEntry]:
+        return repo_map(self.graph, budget, focus)

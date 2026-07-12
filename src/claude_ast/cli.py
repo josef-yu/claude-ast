@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .index import Index
 from .ingest import ingest_project
+from .query import render_repo_map
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,6 +43,11 @@ def main(argv: list[str] | None = None) -> int:
     p_deps.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_deps.add_argument("path", nargs="?", default=".", help="project root (default: .)")
 
+    p_map = sub.add_parser("repo-map", help="ranked skeleton of the codebase")
+    p_map.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+    p_map.add_argument("--focus", default=None, help="bias the map toward a symbol/module id")
+    p_map.add_argument("--budget", type=int, default=2000, help="token budget (default: 2000)")
+
     sub.add_parser("status", help="show index freshness")
 
     args = parser.parse_args(argv)
@@ -56,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_relations(args.symbol, Path(args.path), "callers")
     if args.command == "deps":
         return _cmd_relations(args.symbol, Path(args.path), "deps")
+    if args.command == "repo-map":
+        return _cmd_repo_map(Path(args.path), args.focus, args.budget)
     if args.command == "status":
         print("claude-ast: 'status' is not implemented yet (P1).", file=sys.stderr)
         return 1
@@ -127,6 +135,19 @@ def _cmd_relations(symbol: str, root: Path, which: str) -> int:
     for r in refs:
         loc = f"{r.at.file}:{r.at.line}  " if r.at else ""
         print(f"{loc}[{r.tier}] {r.kind:<9} {r.id}")
+    return 0
+
+
+def _cmd_repo_map(root: Path, focus: str | None, budget: int) -> int:
+    if not root.exists():
+        print(f"claude-ast: path not found: {root}", file=sys.stderr)
+        return 2
+
+    entries = Index.build(root).repo_map(budget=budget, focus=focus)
+    if not entries:
+        print("claude-ast: empty index", file=sys.stderr)
+        return 1
+    print(render_repo_map(entries))
     return 0
 
 

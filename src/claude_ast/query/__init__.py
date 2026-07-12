@@ -1,21 +1,27 @@
 """Query engine + ranker.
 
-find_definition / find_references / find_callers / find_dependencies / impact_of,
-plus repo_map (signatures + docstring lines + confidence-weighted PageRank +
-token budget). All of it is rank-and-render over the same normalized model —
+find_definition / find_references / find_callers / find_dependencies, plus
+repo_map (signatures + docstring lines + confidence-weighted PageRank + token
+budget). All of it is rank-and-render over the same normalized model —
 orientation is not a separate subsystem, it's the graph, ranked.  [P1/P2]
 """
 
 from .lookup import Definition, OutlineEntry, find_definition, outline
+from .rank import pagerank
 from .relations import Reference, find_callers, find_dependencies, find_references
+from .repomap import RepoMapEntry, render_repo_map, repo_map
 
 __all__ = [
     "Definition",
     "OutlineEntry",
     "Reference",
+    "RepoMapEntry",
     "find_callers",
     "find_definition",
     "find_dependencies",
     "find_references",
     "outline",
+    "pagerank",
+    "render_repo_map",
+    "repo_map",
 ]
