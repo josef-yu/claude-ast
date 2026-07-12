@@ -16,7 +16,6 @@ from collections import Counter
 from pathlib import Path
 
 from .index import Index, store_path
-from .ingest import ingest_project
 from .query import render_repo_map
 
 
@@ -77,15 +76,18 @@ def _cmd_index(root: Path) -> int:
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
-    result = ingest_project(root)
-    kinds = Counter(sym.kind.value for fi in result.files for sym in fi.symbols)
-    total = sum(kinds.values())
+    # Build through the Index so the run actually persists the snapshot it warms
+    # — the CLI's whole "build/update the index" contract.
+    index = Index.build(root)
+    symbols = list(index.graph.symbols())
+    kinds = Counter(sym.kind.value for sym in symbols)
+    files = len({sym.span.file for sym in symbols})
 
-    print(f"indexed {len(result.files)} files · {total} symbols")
+    print(f"indexed {files} files · {len(symbols)} symbols")
     for kind, count in sorted(kinds.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"  {count:>6}  {kind}")
-    if result.skipped:
-        print(f"  skipped {len(result.skipped)} file(s) — unreadable or syntax error")
+    if index.skipped:
+        print(f"  skipped {len(index.skipped)} file(s) — unreadable or syntax error")
     return 0
 
 

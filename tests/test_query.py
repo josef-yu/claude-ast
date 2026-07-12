@@ -19,7 +19,7 @@ def _auth_graph() -> Graph:
     for sym in (
         _sym("auth", "auth", SymbolKind.MODULE, 1, doc="Auth module."),
         _sym("auth.authenticate", "authenticate", SymbolKind.FUNCTION, 4,
-             signature="def authenticate(email: str) -> bool"),
+             signature="def authenticate(email: str) -> bool", parent="auth"),
         _sym("auth.User", "User", SymbolKind.CLASS, 8, signature="class User(Base)", parent="auth"),
         _sym("auth.User.save", "save", SymbolKind.METHOD, 11,
              signature="def save(self) -> None", parent="auth.User"),
@@ -57,3 +57,16 @@ def test_outline_is_source_ordered_with_depth():
     assert depth["auth.User.save"] == 2
     order = [e.id for e in entries]
     assert order.index("auth.authenticate") < order.index("auth.User") < order.index("auth.Session")
+
+
+def test_outline_excludes_a_submodule_sharing_the_id_prefix():
+    # `pkg` and `pkg.sub` are separate module roots (parent=None); outlining
+    # `pkg` must return only pkg's own members, not the id-prefix-matching submodule.
+    graph = Graph()
+    graph.add_symbol(_sym("pkg", "pkg", SymbolKind.MODULE, 1))
+    graph.add_symbol(_sym("pkg.top", "top", SymbolKind.FUNCTION, 2, parent="pkg"))
+    graph.add_symbol(_sym("pkg.sub", "sub", SymbolKind.MODULE, 1))
+    graph.add_symbol(_sym("pkg.sub.inner", "inner", SymbolKind.FUNCTION, 2, parent="pkg.sub"))
+
+    ids = [e.id for e in outline(graph, "pkg")]
+    assert ids == ["pkg", "pkg.top"]  # pkg.sub and pkg.sub.inner excluded

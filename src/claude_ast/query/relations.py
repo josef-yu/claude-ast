@@ -29,8 +29,15 @@ def find_callers(graph: Graph, symbol: SymbolId) -> list[Reference]:
 
 
 def find_references(graph: Graph, symbol: SymbolId) -> list[Reference]:
-    """Every symbol that references ``symbol`` (all inbound edges)."""
-    return [_ref(e.src, e) for e in graph.in_edges(symbol)]
+    """Every symbol that *references* ``symbol`` — a use (call, attribute read,
+    inheritance, import), not mere structural containment.
+
+    CONTAINS is excluded explicitly: a parent "containing" a symbol is structure,
+    already carried by parent/children adjacency, not a reference. Stating the
+    exclusion keeps the invariant honest once the P2 resolver stack starts
+    emitting more edge kinds — 'references' won't silently absorb containment.
+    """
+    return [_ref(e.src, e) for e in graph.in_edges(symbol) if e.kind is not EdgeKind.CONTAINS]
 
 
 def find_dependencies(graph: Graph, symbol: SymbolId) -> list[Reference]:

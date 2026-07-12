@@ -40,9 +40,10 @@ def store_path(root: Path) -> Path:
 
 
 class Index:
-    def __init__(self, graph: Graph, root: Path) -> None:
+    def __init__(self, graph: Graph, root: Path, skipped: Sequence[str] = ()) -> None:
         self.graph = graph
         self.root = root
+        self.skipped = list(skipped)  # paths that couldn't be read/parsed this build
 
     @classmethod
     def build(
@@ -57,17 +58,19 @@ class Index:
         re-persisted and deleted files pruned. Symbols are added neutrally; edges
         come from each backend's own (backend-scoped) ``resolve``.
         """
+        root = root.resolve()  # normalize so cache keys are consistent across spellings
         backends = tuple(indexers) if indexers is not None else default_indexers()
         store = SqliteStore(store_path(root)) if use_store else None
-        cache = store.load() if store is not None else {}
-
-        result = ingest_project(root, backends, cache=cache)
-
-        if store is not None:
-            for path, cached in result.fresh.items():
-                store.upsert(path, cached.stamp, cached.file)
-            store.delete(set(cache) - result.present)
-            store.close()
+        try:
+            cache = store.load() if store is not None else {}
+            result = ingest_project(root, backends, cache=cache)
+            if store is not None:
+                for path, cached in result.fresh.items():
+                    store.upsert(path, cached.stamp, cached.file)
+                store.delete(set(cache) - result.present)
+        finally:
+            if store is not None:
+                store.close()  # commit + release even if ingest raised
 
         graph = Graph()
         for file_index in result.files:
@@ -79,7 +82,7 @@ class Index:
             ]
             for edge in backend.resolve(backend_files):
                 graph.add_edge(edge)
-        return cls(graph, root)
+        return cls(graph, root, skipped=result.skipped)
 
     def find_definition(self, name: str) -> list[Definition]:
         return find_definition(self.graph, name)

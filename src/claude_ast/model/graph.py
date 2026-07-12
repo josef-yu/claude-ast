@@ -22,7 +22,7 @@ class Graph:
     what lets incremental invalidation find edges pointing *into* a changed file.
     """
 
-    __slots__ = ("_symbols", "_out", "_in", "_by_file", "_by_name")
+    __slots__ = ("_symbols", "_out", "_in", "_by_file", "_by_name", "_children")
 
     def __init__(self) -> None:
         self._symbols: dict[SymbolId, Symbol] = {}
@@ -30,6 +30,9 @@ class Graph:
         self._in: dict[SymbolId, list[Edge]] = defaultdict(list)
         self._by_file: dict[str, list[SymbolId]] = defaultdict(list)
         self._by_name: dict[str, list[SymbolId]] = defaultdict(list)
+        # parent id -> its direct children, in insertion (source) order. This is
+        # the structural tree the neutral layer walks instead of parsing ids.
+        self._children: dict[SymbolId, list[SymbolId]] = defaultdict(list)
 
     # --- mutation (single writer) ---
 
@@ -37,6 +40,8 @@ class Graph:
         self._symbols[sym.id] = sym
         self._by_file[sym.span.file].append(sym.id)
         self._by_name[sym.name].append(sym.id)
+        if sym.parent is not None:
+            self._children[sym.parent].append(sym.id)
 
     def add_edge(self, edge: Edge) -> None:
         self._out[edge.src].append(edge)
@@ -56,6 +61,15 @@ class Graph:
     def by_name(self, name: str) -> list[Symbol]:
         """All symbols sharing a bare name — the basis for find_definition('User')."""
         return [self._symbols[s] for s in self._by_name.get(name, ())]
+
+    def children(self, sid: SymbolId) -> list[Symbol]:
+        """A symbol's direct children, in source order — a module's members, a class's methods.
+
+        The structural primitive the neutral query layer walks: outline and
+        focus-subtree membership come from this adjacency, never from parsing the
+        dotted id (which is a Python-ism the seam must not leak).
+        """
+        return [self._symbols[c] for c in self._children.get(sid, ())]
 
     def out_edges(self, sid: SymbolId, kind: EdgeKind | None = None) -> list[Edge]:
         """Outbound edges — the basis for find_dependencies."""

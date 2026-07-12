@@ -10,9 +10,16 @@ distribution, biasing the ranking toward that symbol's neighbourhood.
 
 from __future__ import annotations
 
-from ..model import Confidence, Graph, SymbolId
+from ..model import Confidence, EdgeKind, Graph, SymbolId
 
 _WEIGHT = {Confidence.HIGH: 1.0, Confidence.MEDIUM: 0.5, Confidence.LOW: 0.2}
+
+# Only genuine reference edges flow importance. Containment is structure (a module
+# does not "use" the functions it holds) and imports are module-level plumbing, so
+# both are excluded — otherwise a container floats up merely for what it contains.
+# The set is explicit, not "all kinds", so a future resolver adding IMPORT/CONTAINS
+# edges opts into ranking deliberately rather than silently distorting it.
+_RANK_KINDS = frozenset({EdgeKind.CALL, EdgeKind.REFERENCE, EdgeKind.INHERITS})
 
 
 def pagerank(
@@ -31,7 +38,11 @@ def pagerank(
     adjacency: dict[SymbolId, list[tuple[SymbolId, float]]] = {}
     out_weight: dict[SymbolId, float] = {}
     for i in ids:
-        pairs = [(e.dst, _WEIGHT[e.resolution.confidence]) for e in graph.out_edges(i)]
+        pairs = [
+            (e.dst, _WEIGHT[e.resolution.confidence])
+            for e in graph.out_edges(i)
+            if e.kind in _RANK_KINDS
+        ]
         adjacency[i] = pairs
         out_weight[i] = sum(w for _, w in pairs)
 
@@ -52,10 +63,20 @@ def pagerank(
 
 def _teleport(graph: Graph, ids: list[SymbolId], focus: str | None) -> dict[SymbolId, float]:
     n = len(ids)
-    if focus:
-        seed = {
-            s.id for s in graph.symbols() if s.id == focus or s.id.startswith(f"{focus}.")
-        } & set(ids)
+    if focus and graph.symbol(focus) is not None:
+        # The focus symbol and everything nested under it (a class's methods, a
+        # module's members) — walked via the tree, never matched on id text.
+        seed = set(_subtree_ids(graph, focus)) & set(ids)
         if seed:
             return {i: (1.0 / len(seed) if i in seed else 0.0) for i in ids}
     return dict.fromkeys(ids, 1.0 / n)
+
+
+def _subtree_ids(graph: Graph, root: SymbolId) -> list[SymbolId]:
+    out: list[SymbolId] = []
+    stack = [root]
+    while stack:
+        sid = stack.pop()
+        out.append(sid)
+        stack.extend(child.id for child in graph.children(sid))
+    return out

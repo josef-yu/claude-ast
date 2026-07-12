@@ -67,9 +67,16 @@ def iter_source_files(
     extensions: frozenset[str],
     exclude: frozenset[str] = DEFAULT_EXCLUDE,
 ) -> Iterator[Path]:
-    """Yield every file under ``root`` with a claimed extension, avoiding excluded dirs."""
-    for ext in extensions:
-        for path in root.rglob(f"*{ext}"):
+    """Yield every file under ``root`` with a claimed extension, avoiding excluded dirs.
+
+    Discovery is sorted (extensions, then paths) so symbol-insertion order — and
+    therefore PageRank's float-summation order and repo_map's tie-breaks — is
+    identical across machines and filesystems. ``rglob`` alone yields raw
+    ``os.scandir`` order, which is platform-dependent; the ``deterministic &
+    local`` guarantee is earned here, at the one place ordering originates.
+    """
+    for ext in sorted(extensions):
+        for path in sorted(root.rglob(f"*{ext}")):
             if any(part in exclude for part in path.relative_to(root).parts):
                 continue
             yield path

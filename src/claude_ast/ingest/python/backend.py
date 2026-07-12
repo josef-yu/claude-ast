@@ -26,11 +26,16 @@ class PythonIndexer:
     extensions = frozenset({".py"})
 
     def ingest_file(self, path: Path, root: Path) -> FileIndex | None:
+        # Read bytes and let ast.parse honor a UTF-8 BOM and any PEP 263 coding
+        # cookie itself — decoding as strict UTF-8 first would drop valid files.
         try:
-            source = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            source = path.read_bytes()
+        except OSError:
             return None
-        return self.ingest_text(path, root, source)
+        try:
+            return self.ingest_source(str(path), source, module_qualname(path, root))
+        except SyntaxError:
+            return None
 
     def ingest_text(self, path: Path, root: Path, source: str) -> FileIndex | None:
         try:
@@ -38,11 +43,13 @@ class PythonIndexer:
         except SyntaxError:
             return None
 
-    def ingest_source(self, path: str, source: str, module: str) -> FileIndex:
+    def ingest_source(self, path: str, source: str | bytes, module: str) -> FileIndex:
         """Parse one module's source into a FileIndex. Raises ``SyntaxError`` on bad input."""
         tree = ast.parse(source, filename=path)
-        symbols = extract_symbols(tree, module, path)
-        refs, imports = extract_refs(tree, module, path)
+        # One id-assignment authority: symbols mints ids, refs consumes the same
+        # node->id map so an edge's src is exactly its enclosing symbol's id.
+        symbols, node_ids = extract_symbols(tree, module, path)
+        refs, imports = extract_refs(tree, module, path, node_ids)
         return FileIndex(path=path, module=module, symbols=symbols, refs=refs, imports=imports)
 
     def resolve(self, files: Sequence[FileIndex]) -> Iterable[Edge]:
@@ -54,7 +61,12 @@ class PythonIndexer:
         """
         all_ids = {sym.id for fi in files for sym in fi.symbols}
         for fi in files:
-            module_defs = {s.name: s.id for s in fi.symbols if s.parent == fi.module}
+            # First definition wins when a name has same-qualname siblings (``#N``),
+            # so binding is deterministic regardless of symbol order.
+            module_defs: dict[str, str] = {}
+            for s in fi.symbols:
+                if s.parent == fi.module:
+                    module_defs.setdefault(s.name, s.id)
             for ref in fi.refs:
                 dst = _bind(ref.name, module_defs, fi.imports, all_ids)
                 if dst is not None:

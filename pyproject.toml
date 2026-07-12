@@ -31,12 +31,16 @@ packages = ["src/claude_ast"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Golden-index fixtures are parsed as data, not imported — they intentionally
+# contain unresolved imports and version-gated redefinitions.
+extend-exclude = ["tests/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pyright]
 include = ["src", "tests"]
+exclude = ["tests/fixtures"]
 extraPaths = ["src"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"

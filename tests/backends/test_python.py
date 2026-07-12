@@ -90,6 +90,41 @@ def test_def_inside_a_block_still_module_scoped():
     assert syms["m.hidden"].kind is SymbolKind.FUNCTION
 
 
+def test_same_qualname_defs_both_kept_via_disambiguation():
+    # Conditional/redefined defs share a qualname; neither may silently overwrite
+    # the other in the index. First keeps the base id, the rest get `#N`.
+    syms = _by_id(
+        "if X:\n    def feature():\n        ...\n"
+        "else:\n    def feature():\n        ...\n",
+        module="m",
+    )
+    assert "m.feature" in syms
+    assert "m.feature#2" in syms
+    assert syms["m.feature"].name == syms["m.feature#2"].name == "feature"
+
+
+def test_reassigned_variable_is_one_symbol_not_a_collision():
+    # A rebound module-level name is the same variable, not two — no `#N` spam.
+    syms = _by_id("x = 1\nx = 2\n", module="m")
+    assert "m.x" in syms
+    assert "m.x#2" not in syms
+
+
+def test_same_qualname_sibling_owns_its_own_edges(tmp_path):
+    # The `#2` (else-branch) def must carry its OWN edges, not have them
+    # misattributed to the first def: reference extraction consumes the same
+    # node->id map symbol extraction mints, so an edge's src == its enclosing id.
+    (tmp_path / "m.py").write_text(
+        "def target():\n    ...\n\n\n"
+        "if X:\n"
+        "    def feature():\n        ...\n"        # first def — no call
+        "else:\n"
+        "    def feature():\n        target()\n"   # `#2` def — the sole caller
+    )
+    index = Index.build(tmp_path)
+    assert {r.id for r in index.find_callers("m.target")} == {"m.feature#2"}
+
+
 def test_end_to_end_python_source_is_queryable(tmp_path):
     # Backend integration: real Python source flows through parse -> assemble ->
     # query. The query logic itself is proved neutrally in tests/test_query.py.
@@ -133,6 +168,62 @@ def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     index = Index.build(tmp_path)
 
     assert index.find_callers("m.run") == []
+
+
+def test_non_parameter_locals_do_not_bind_to_module_functions(tmp_path):
+    # assignment, for-target, and comprehension shadows must not emit false edges
+    (tmp_path / "m.py").write_text(
+        "def save(): ...\n"
+        "def helper(): ...\n\n\n"
+        "def run(items):\n"
+        "    save = items[0]\n"  # local assignment shadows module save
+        "    save()\n"
+        "    for helper in items:\n"  # for-target shadows module helper
+        "        helper()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_callers("m.save") == []
+    assert index.find_callers("m.helper") == []
+
+
+def test_function_local_import_does_not_leak_module_wide(tmp_path):
+    # a `from x import y` inside one function must not let a sibling's bare y() bind
+    (tmp_path / "m.py").write_text(
+        "def a():\n"
+        "    from other import thing\n"
+        "    thing()\n\n\n"
+        "def b():\n"
+        "    thing()\n"  # NameError at runtime — must not bind anywhere
+    )
+    (tmp_path / "other.py").write_text("def thing(): ...\n")
+    index = Index.build(tmp_path)
+    # b.thing() must not resolve to other.thing (a's local import doesn't leak)
+    assert "m.b" not in {r.id for r in index.find_callers("other.thing")}
+
+
+def test_call_in_a_default_argument_is_attributed_to_the_enclosing_scope(tmp_path):
+    (tmp_path / "m.py").write_text("def make(): ...\n\n\ndef f(x=make()):\n    ...\n")
+    index = Index.build(tmp_path)
+    # the default `make()` runs at module scope and must not be dropped
+    assert "m.make" in {r.id for fam in ("m",) for r in index.find_dependencies(fam)}
+
+
+def test_bom_prefixed_source_is_still_parsed(tmp_path):
+    (tmp_path / "m.py").write_bytes(b"\xef\xbb\xbfdef f():\n    ...\n")  # UTF-8 BOM
+    index = Index.build(tmp_path)
+    assert [d.id for d in index.find_definition("m.f")] == ["m.f"]
+
+
+def test_defs_inside_a_match_case_become_symbols(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "def pick(x):\n"
+        "    match x:\n"
+        "        case 1:\n"
+        "            def inner():\n"
+        "                ...\n"
+    )
+    index = Index.build(tmp_path)
+    assert [d.id for d in index.find_definition("m.pick.inner")] == ["m.pick.inner"]
 
 
 def test_warm_start_preserves_results_and_writes_a_snapshot(tmp_path):

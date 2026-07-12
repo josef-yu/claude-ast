@@ -35,7 +35,9 @@ def repo_map(graph: Graph, budget: int = 2000, focus: str | None = None) -> list
     """The top structural symbols by rank, filled to ``budget`` tokens."""
     ranks = pagerank(graph, focus)
     candidates = [s for s in graph.symbols() if s.kind in _STRUCTURAL]
-    candidates.sort(key=lambda s: ranks.get(s.id, 0.0), reverse=True)
+    # Rank desc, then id asc as an explicit tie-break: the huge population of
+    # equal-rank (no-inbound) symbols must order on stable id, not insertion order.
+    candidates.sort(key=lambda s: (-ranks.get(s.id, 0.0), s.id))
 
     entries: list[RepoMapEntry] = []
     spent = 0
@@ -44,7 +46,7 @@ def repo_map(graph: Graph, budget: int = 2000, focus: str | None = None) -> list
         if entries and spent + cost > budget:
             break
         spent += cost
-        module = _module_of(graph, sym)
+        module, depth = _module_and_depth(graph, sym)
         entries.append(
             RepoMapEntry(
                 id=sym.id,
@@ -53,7 +55,7 @@ def repo_map(graph: Graph, budget: int = 2000, focus: str | None = None) -> list
                 signature=sym.signature,
                 doc=sym.doc,
                 module=module,
-                depth=max(sym.id.count(".") - module.count("."), 0),
+                depth=depth,
                 line=sym.span.line,
                 rank=ranks.get(sym.id, 0.0),
             )
@@ -66,12 +68,12 @@ def render_repo_map(entries: list[RepoMapEntry]) -> str:
     by_module: dict[SymbolId, list[RepoMapEntry]] = defaultdict(list)
     for entry in entries:
         by_module[entry.module].append(entry)
-    modules = sorted(by_module, key=lambda m: max(x.rank for x in by_module[m]), reverse=True)
+    modules = sorted(by_module, key=lambda m: (-max(x.rank for x in by_module[m]), m))
 
     lines: list[str] = []
     for module in modules:
         lines.append(module)
-        for entry in sorted(by_module[module], key=lambda x: x.line):
+        for entry in sorted(by_module[module], key=lambda x: (x.line, x.id)):
             indent = "  " * max(entry.depth, 1)
             label = entry.signature or f"{entry.kind} {entry.name}"
             doc = f"    # {entry.doc}" if entry.doc else ""
@@ -79,14 +81,20 @@ def render_repo_map(entries: list[RepoMapEntry]) -> str:
     return "\n".join(lines)
 
 
-def _module_of(graph: Graph, sym: Symbol) -> SymbolId:
+def _module_and_depth(graph: Graph, sym: Symbol) -> tuple[SymbolId, int]:
+    """Walk parents to the owning module, counting hops — the neutral replacement
+    for parsing dotted ids. The topmost ancestor is the module; the hop count is
+    the symbol's nesting depth within it (indentation for the skeleton).
+    """
     cur = sym
+    depth = 0
     while cur.parent is not None:
         parent = graph.symbol(cur.parent)
         if parent is None:
             break
         cur = parent
-    return cur.id
+        depth += 1
+    return cur.id, depth
 
 
 def _tokens(sym: Symbol) -> int:

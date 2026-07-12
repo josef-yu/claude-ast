@@ -46,8 +46,9 @@ def test_iter_source_files_skips_excluded_dirs(tmp_path):
 def test_default_backend_dispatches_python_and_ignores_others(tmp_path):
     (tmp_path / "a.py").write_text("def f():\n    ...\n")
     (tmp_path / "notes.md").write_text("# not claimed by any backend\n")
-    ids = {sym.id for fi in ingest_project(tmp_path).files for sym in fi.symbols}
-    assert ids == {"a", "a.f"}
+    result = ingest_project(tmp_path)
+    # routing only (neutral): the .py file is ingested, the .md is not
+    assert {Path(fi.path).name for fi in result.files} == {"a.py"}
 
 
 def test_orchestrator_routes_to_any_backend_by_protocol(tmp_path):
@@ -82,7 +83,5 @@ def test_changed_file_is_reparsed_and_deletion_pruned(tmp_path):
     (tmp_path / "b.py").unlink()  # deletion
 
     warm = ingest_project(tmp_path, cache=cache)
-    assert str(a) in warm.fresh  # changed file reparsed
-    assert str(tmp_path / "b.py") not in warm.present  # gone -> prunable
-    ids = {s.id for fi in warm.files for s in fi.symbols}
-    assert ids == {"a", "a.f", "a.h"}
+    assert str(a) in warm.fresh  # changed file reparsed (stamp differs)
+    assert warm.present == {str(a)}  # deleted b.py no longer present -> prunable

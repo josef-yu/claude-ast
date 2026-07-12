@@ -12,12 +12,15 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from ..ingest.product import CachedFile, FileIndex, FileStamp
+from .base import Store
 from .serialize import from_json, to_json
 
-_SCHEMA_VERSION = 1
+# Bump whenever the persisted parse products change shape OR the parser's output
+# semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
+_SCHEMA_VERSION = 4  # ref.src now carries `#N` ids (single id-assignment authority)
 
 
-class SqliteStore:
+class SqliteStore(Store):
     def __init__(self, db_path: Path) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         _write_self_ignore(db_path.parent)

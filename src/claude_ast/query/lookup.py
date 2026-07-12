@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..model import Graph, Span, SymbolId
+from ..model import Graph, Span, Symbol, SymbolId
 
 
 @dataclass(slots=True)
@@ -48,19 +48,23 @@ def find_definition(graph: Graph, name: str) -> list[Definition]:
 
 
 def outline(graph: Graph, module: SymbolId) -> list[OutlineEntry]:
-    """A module's symbols, in source order, with nesting depth for indentation."""
-    prefix = f"{module}."
-    members = [s for s in graph.symbols() if s.id == module or s.id.startswith(prefix)]
-    members.sort(key=lambda s: (s.span.file, s.span.line))
-    base = module.count(".")
-    return [
-        OutlineEntry(
-            id=s.id,
-            name=s.name,
-            kind=s.kind.value,
-            signature=s.signature,
-            doc=s.doc,
-            depth=max(s.id.count(".") - base, 0),
+    """A module's own symbols, in source order, with nesting depth for indentation.
+
+    Walks the structural tree from the module down through its members (a class's
+    methods nest one deeper), so a *sub*module — a separate root that merely
+    shares an id prefix — is correctly excluded, not swept in by a string match.
+    """
+    root = graph.symbol(module)
+    if root is None:
+        return []
+    entries: list[OutlineEntry] = []
+
+    def walk(sym: Symbol, depth: int) -> None:
+        entries.append(
+            OutlineEntry(sym.id, sym.name, sym.kind.value, sym.signature, sym.doc, depth)
         )
-        for s in members
-    ]
+        for child in graph.children(sym.id):
+            walk(child, depth + 1)
+
+    walk(root, 0)
+    return entries

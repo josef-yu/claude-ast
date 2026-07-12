@@ -22,10 +22,21 @@ _BLOCKS = (
     ast.AsyncWith,
     ast.Try,
     ast.ExceptHandler,
+    ast.Match,
+    ast.match_case,
 )
 
 
-def extract_symbols(tree: ast.Module, module: str, path: str) -> list[Symbol]:
+def extract_symbols(
+    tree: ast.Module, module: str, path: str
+) -> tuple[list[Symbol], dict[ast.AST, str]]:
+    """Extract a module's symbols and the authoritative ``def/class node -> id`` map.
+
+    The map is the single id-assignment authority: reference extraction consumes
+    it (rather than re-deriving ids by concatenation) so an edge's ``src`` is
+    always the exact id of its enclosing symbol — including the ``#N`` suffix of a
+    same-qualname sibling, which a second traversal cannot reproduce on its own.
+    """
     symbols: list[Symbol] = [
         Symbol(
             id=module,
@@ -35,36 +46,66 @@ def extract_symbols(tree: ast.Module, module: str, path: str) -> list[Symbol]:
             doc=_docline(tree),
         )
     ]
-    _visit(tree, module, "module", path, symbols)
-    return symbols
+    node_ids: dict[ast.AST, str] = {}
+    _visit(tree, module, "module", path, symbols, {module}, node_ids)
+    return symbols, node_ids
 
 
-def _visit(node: ast.AST, prefix: str, container: str, path: str, out: list[Symbol]) -> None:
+def _visit(
+    node: ast.AST,
+    prefix: str,
+    container: str,
+    path: str,
+    out: list[Symbol],
+    seen: set[str],
+    node_ids: dict[ast.AST, str],
+) -> None:
     for child in ast.iter_child_nodes(node):
         if isinstance(child, ast.ClassDef):
-            cid = f"{prefix}.{child.name}"
+            cid = _unique(f"{prefix}.{child.name}", seen)
+            node_ids[child] = cid
             out.append(
                 Symbol(cid, child.name, SymbolKind.CLASS, span(path, child),
                        signature=_class_sig(child), doc=_docline(child), parent=prefix)
             )
-            _visit(child, cid, "class", path, out)
+            _visit(child, cid, "class", path, out, seen, node_ids)
         elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
-            fid = f"{prefix}.{child.name}"
+            fid = _unique(f"{prefix}.{child.name}", seen)
+            node_ids[child] = fid
             kind = SymbolKind.METHOD if container == "class" else SymbolKind.FUNCTION
             out.append(
                 Symbol(fid, child.name, kind, span(path, child),
                        signature=_func_sig(child), doc=_docline(child), parent=prefix)
             )
-            _visit(child, fid, "function", path, out)
+            _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, ast.Assign | ast.AnnAssign):
             if container in ("module", "class"):
                 for name in _assigned_names(child):
+                    vid = f"{prefix}.{name}"
+                    if vid in seen:
+                        continue  # reassignment of the same name — one variable, not two
+                    seen.add(vid)
                     out.append(
-                        Symbol(f"{prefix}.{name}", name, SymbolKind.VARIABLE,
-                               span(path, child), parent=prefix)
+                        Symbol(vid, name, SymbolKind.VARIABLE, span(path, child), parent=prefix)
                     )
         elif isinstance(child, _BLOCKS):
-            _visit(child, prefix, container, path, out)
+            _visit(child, prefix, container, path, out, seen, node_ids)
+
+
+def _unique(base: str, seen: set[str]) -> str:
+    """A collision-free id: distinct same-qualname *defs* (conditional/overloaded
+    functions, redefinitions) each keep their own symbol instead of one silently
+    overwriting another in the graph. First keeps ``base``; the rest get ``#N``.
+    """
+    if base not in seen:
+        seen.add(base)
+        return base
+    n = 2
+    while f"{base}#{n}" in seen:
+        n += 1
+    uid = f"{base}#{n}"
+    seen.add(uid)
+    return uid
 
 
 def _docline(
