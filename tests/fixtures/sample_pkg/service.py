@@ -1,6 +1,6 @@
 """Service layer for the golden index fixture."""
 
-from sample_pkg.core import Base, hub
+from .core import Base, hub
 
 
 class Service(Base):

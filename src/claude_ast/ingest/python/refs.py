@@ -26,6 +26,7 @@ full type-aware resolution remain P2.
 from __future__ import annotations
 
 import ast
+from pathlib import Path
 
 from ...model import EdgeKind
 from ..product import RawRef
@@ -37,7 +38,7 @@ def extract_refs(
 ) -> tuple[list[RawRef], dict[str, str]]:
     refs: list[RawRef] = []
     _visit(tree, module, path, refs, [], {}, node_ids)
-    return refs, _collect_imports(tree)
+    return refs, _collect_imports(tree, _package(module, path))
 
 
 def _visit(
@@ -226,9 +227,30 @@ def _add_target(target: ast.expr, names: set[str]) -> None:
             _add_target(elt, names)
 
 
-def _collect_imports(tree: ast.Module) -> dict[str, str]:
+def _package(module: str, path: str) -> str:
+    """The importing module's package — Python's ``__package__``, the anchor a relative
+    import resolves against. A package's ``__init__`` is its own package; a regular
+    module's package is its parent (``""`` for a top-level module)."""
+    if Path(path).name == "__init__.py":
+        return module
+    return module.rpartition(".")[0]
+
+
+def _relative_module(package: str, level: int, module: str | None) -> str | None:
+    """Resolve a relative import's target module qualname by Python's own rule, or
+    ``None`` if the ``level`` dots walk above the top-level package."""
+    bits = package.rsplit(".", level - 1)
+    if not package or len(bits) < level:
+        return None
+    base = bits[0]
+    return f"{base}.{module}" if module else base
+
+
+def _collect_imports(tree: ast.Module, package: str) -> dict[str, str]:
     """Map each MODULE-level imported name to the qualname it refers to.
 
+    Absolute and relative imports both resolve to an absolute qualname; a relative
+    import is anchored on ``package`` (the importing module's ``__package__``).
     Deliberately does not descend into function or class bodies — an import there
     binds a local/class name, not a module-wide one.
     """
@@ -248,9 +270,12 @@ def _collect_imports(tree: ast.Module) -> dict[str, str]:
                         top = alias.name.split(".")[0]  # `import a.b` binds `a` -> a
                         imports[top] = top
             elif isinstance(child, ast.ImportFrom):
-                if child.level:
-                    continue  # relative import — needs package resolution, deferred (P2)
-                mod = child.module or ""
+                if child.level:  # `from . import x` / `from ..pkg import y`
+                    mod = _relative_module(package, child.level, child.module)
+                    if mod is None:
+                        continue  # walks above the top-level package — unresolvable
+                else:
+                    mod = child.module or ""
                 for alias in child.names:
                     local = alias.asname or alias.name
                     imports[local] = f"{mod}.{alias.name}" if mod else alias.name

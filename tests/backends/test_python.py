@@ -381,6 +381,45 @@ def test_subscripted_annotation_is_deferred(tmp_path):
     assert index.find_dependencies("m.store") == []
 
 
+def test_relative_import_binds_cross_module(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "core.py").write_text("def hub():\n    ...\n")
+    (pkg / "service.py").write_text("from .core import hub\n\n\ndef run():\n    return hub()\n")
+    index = Index.build(tmp_path)
+
+    assert "pkg.service.run" in {r.id for r in index.find_callers("pkg.core.hub")}
+
+
+def test_double_dot_relative_import_feeds_annotation_resolution(tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "sub").mkdir(parents=True)
+    (pkg / "__init__.py").write_text("")
+    (pkg / "sub" / "__init__.py").write_text("")
+    (pkg / "model.py").write_text("class Graph:\n    def add(self):\n        ...\n")
+    (pkg / "sub" / "q.py").write_text(
+        "from ..model import Graph\n\n\ndef run(g: Graph):\n    return g.add()\n"
+    )
+    index = Index.build(tmp_path)
+
+    # `from ..model import Graph` resolves to pkg.model.Graph, so `g: Graph; g.add()` binds.
+    assert ("pkg.model.Graph.add", "possible") in {
+        (d.id, d.tier) for d in index.find_dependencies("pkg.sub.q.run")
+    }
+
+
+def test_relative_import_beyond_top_level_is_skipped(tmp_path):
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    # `...` from pkg.m walks above the top-level package -> unresolvable, no crash, no edge.
+    (pkg / "m.py").write_text("from ... import x\n\n\ndef f():\n    return x()\n")
+    index = Index.build(tmp_path)
+
+    assert index.find_dependencies("pkg.m.f") == []
+
+
 def test_local_parameter_does_not_bind_to_a_module_function(tmp_path):
     (tmp_path / "m.py").write_text(
         "def run():\n    ...\n\n\n"
