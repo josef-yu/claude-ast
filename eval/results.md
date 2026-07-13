@@ -110,3 +110,59 @@ is wrong."* What these experiments do **not** measure, and where value may still
 Bottom line: on a large but *well-structured* codebase, an LLM's own text-search competence sets a high
 bar the tool didn't clear in these tasks. The differentiator matters most where text search fails — which
 Django's clean conventions rarely trigger.
+
+---
+
+# Eval results — v3 (the tool's edge: ambiguous-name reverse-import)
+
+**Verdict: accuracy tie, but the tool wins on effort — ~43% fewer output tokens and ~10x fewer file reads
+for the same answer.** The first eval where claude-ast comes out ahead, and it does so exactly where predicted.
+
+## Setup
+
+Enumerate the modules that import a `base`-named module — `django.{template,views.generic,core.serializers}.base`.
+`base` occurs 68x as a module and thousands of times as text, so grep genuinely drowns. Treatment leans on the
+new **`importers`** reverse-import query; control greps. Ground truth from an **independent AST oracle**,
+cross-checked to match the tool exactly (so treatment being right = the tool is *correct*). Deterministic
+set-F1, N=4/arm/target, on a worktree.
+
+## Results (mean of 12 / arm)
+
+| Metric | Treatment | Control |
+|---|---|---|
+| precision / recall / **F1** | 0.90 / 1.0 / **0.944** | 0.90 / 1.0 / **0.944** |
+| output tokens / agent | **5,560** | 9,738 |
+| files read / agent | **0.08** | 0.83 |
+| tool calls / agent | **3.4** | 6.4 |
+
+Per target: `template.base` 1.0/1.0, `generic.base` 1.0/1.0, `serializers.base` 0.83/0.83 (tie throughout).
+
+Accuracy is identical — a capable LLM+grep *disambiguates by reading* and reaches the same set. The tool's win
+is **effort**: one resolved `importers` call vs grep-then-read-to-disambiguate.
+
+**Limitation surfaced (`serializers.base`, 0.83 both):** both arms reported 2 importers the oracle *and* the
+tool missed — `from django.core.serializers import base` style, where the imported name is a submodule. claude-ast's
+`importers` records the *from-module* only, so it has a recall gap on `from parent import submodule`; the agents
+caught the extras by reading. A real, fixable gap (the deferred from-module-granularity choice), and a reminder
+not to trust the tool's set blindly.
+
+---
+
+# Final synthesis (v1 + v2 + v3)
+
+| Eval | Task | Symbol name | Accuracy | Effort |
+|---|---|---|---|---|
+| v1 | plan a fix | named in ticket | tie | tool **+20%** (loss) |
+| v2 | find-all-callers | distinctive | tie | tie (wash) |
+| v3 | find-all-importers | **ambiguous** | tie | tool **~2x cheaper** (win) |
+
+**The tool never changes the final answer** — an LLM is thorough enough to reach it with grep + reading. **Its
+value is *efficiency*, and only when the name is ambiguous:** then grep needs disambiguation reads and the tool
+doesn't, so the resolved query is ~half the cost. On distinctive names (v1/v2) grep is already cheap, so there's
+no win — and planning (v1) even costs *more*, because the tool's narrow query surface adds calls without
+displacing the git-history/behavior/test work that dominates.
+
+**Value regime:** ambiguous-name *resolution* queries (`callers`/`importers` where text search yields false
+positives). Narrow on Django (clean, distinctive naming); it would widen on messier codebases. The honest
+takeaway isn't "the tool is bad" — it's "for an LLM agent on a well-named codebase, the tool buys *effort*, not
+*capability*, and only in its niche."
