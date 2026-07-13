@@ -16,6 +16,7 @@ from collections import Counter
 from pathlib import Path
 
 from .index import Index, store_path
+from .log import configure as configure_logging
 from .model import Confidence
 from .query import render_repo_map
 
@@ -31,6 +32,7 @@ def _add_min_confidence(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging()  # diagnostics -> stderr, keeping stdout a clean data channel
     parser = argparse.ArgumentParser(prog="claude-ast", description=__doc__)
     sub = parser.add_subparsers(dest="command")
 

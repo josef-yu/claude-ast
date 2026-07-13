@@ -9,6 +9,7 @@ namespaced by module path, so a second language could never cross-bind.
 from __future__ import annotations
 
 import ast
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -21,6 +22,8 @@ from .refs import extract_refs
 from .stubs import STDLIB_STUBS, StubProvider
 from .symbols import extract_symbols
 from .typeres import resolve_value_types
+
+logger = logging.getLogger(__name__)
 
 
 class PythonIndexer:
@@ -39,17 +42,20 @@ class PythonIndexer:
         # cookie itself — decoding as strict UTF-8 first would drop valid files.
         try:
             source = path.read_bytes()
-        except OSError:
+        except OSError as exc:
+            logger.warning("skipping %s: %s", path, exc)
             return None
         try:
             return self.ingest_source(str(path), source, module_qualname(path, root))
-        except SyntaxError:
+        except SyntaxError as exc:
+            logger.warning("skipping %s: %s", path, exc)
             return None
 
     def ingest_text(self, path: Path, root: Path, source: str) -> FileIndex | None:
         try:
             return self.ingest_source(str(path), source, module_qualname(path, root))
-        except SyntaxError:
+        except SyntaxError as exc:
+            logger.warning("skipping %s: %s", path, exc)
             return None
 
     def ingest_source(self, path: str, source: str | bytes, module: str) -> FileIndex:
