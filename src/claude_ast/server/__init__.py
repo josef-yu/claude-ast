@@ -1,7 +1,11 @@
-"""MCP server — FastMCP wrapping the proven engine.
+"""MCP server — FastMCP wrapping the proven engine (stdio, one process per project).
 
-stdio transport, one long-lived process per project, ambient watcher, read-only
-``status`` / ``list_projects``. Built LAST, once the engine is validated on real
-repos via the CLI. The tool surface is sized empirically by usefulness eval, not
-specced up front.  [P3]
+``build_server(index)`` registers the read-only navigation tools; ``__main__`` builds the
+index and runs the stdio loop (``claude-ast-mcp [root]``). The live watcher that keeps the
+index fresh across edits is the next P3 increment. The tool surface mirrors the
+CLI-validated queries and grows by usefulness eval, not up-front spec.
 """
+
+from .app import build_server
+
+__all__ = ["build_server"]

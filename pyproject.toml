@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 claude-ast = "claude_ast.cli:main"
+claude-ast-mcp = "claude_ast.server.__main__:main"
 
 [dependency-groups]
 dev = [

@@ -1,0 +1,96 @@
+"""FastMCP server — read-only navigation tools over a project's Index, spoken on stdio.
+
+Wraps the proven engine: the same queries the CLI validated, exposed as MCP tools for
+Claude Code. ``build_server`` takes a pre-built ``Index`` (so it is transport-free and
+testable); the entry point (``__main__``) builds the index once per project and runs the
+stdio loop. Diagnostics go to stderr via the logging seam — stdout is the protocol channel.
+
+Tool bodies delegate to module-level shapers (``_definition`` etc.) that turn the engine's
+dataclasses into JSON-friendly dicts, so the surface is unit-testable without a transport.
+The tool set mirrors the CLI-validated queries; it grows by usefulness eval, not up front.
+"""
+
+from __future__ import annotations
+
+from typing import Literal
+
+from mcp.server.fastmcp import FastMCP
+
+from ..index import Index
+from ..model import Confidence
+from ..query import Reference, render_repo_map
+
+_Conf = Literal["high", "medium", "low"]
+
+
+def _definition(index: Index, name: str) -> list[dict]:
+    return [
+        {
+            "id": d.id,
+            "kind": d.kind,
+            "file": d.span.file,
+            "line": d.span.line,
+            "signature": d.signature,
+        }
+        for d in index.find_definition(name)
+    ]
+
+
+def _outline(index: Index, module: str) -> list[dict]:
+    return [
+        {
+            "id": e.id,
+            "name": e.name,
+            "kind": e.kind,
+            "depth": e.depth,
+            "signature": e.signature,
+            "doc": e.doc,
+        }
+        for e in index.outline(module)
+    ]
+
+
+def _ref(r: Reference) -> dict:
+    return {
+        "id": r.id,
+        "kind": r.kind,
+        "tier": r.tier,  # definite | possible
+        "location": f"{r.at.file}:{r.at.line}" if r.at else None,
+        "external": r.external,
+    }
+
+
+def build_server(index: Index) -> FastMCP:
+    """Register the read-only navigation tools over ``index`` and return the FastMCP app."""
+    mcp = FastMCP("claude-ast")
+
+    @mcp.tool()
+    def find_definition(name: str) -> list[dict]:
+        """Where a name is defined. `name` is a bare name (`User`) or a qualified id
+        (`pkg.mod.User`); a bare name returns every symbol with that short name."""
+        return _definition(index, name)
+
+    @mcp.tool()
+    def outline(module: str) -> list[dict]:
+        """A module's own symbols in source order, each with a nesting `depth` and signature."""
+        return _outline(index, module)
+
+    @mcp.tool()
+    def find_callers(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
+        """Symbols that call `symbol`. Each result carries a `tier` (definite | possible);
+        widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
+        return [_ref(r) for r in index.find_callers(symbol, Confidence(min_confidence))]
+
+    @mcp.tool()
+    def find_dependencies(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
+        """What `symbol` uses — calls, inheritance, and library targets (flagged `external`).
+        Widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
+        return [_ref(r) for r in index.find_dependencies(symbol, Confidence(min_confidence))]
+
+    @mcp.tool()
+    def repo_map(focus: str | None = None, budget: int = 2000) -> str:
+        """A ranked, token-budgeted skeleton of the codebase, optionally biased toward a
+        `focus` symbol/module id. `budget` caps the approximate token size."""
+        return render_repo_map(index.repo_map(budget=budget, focus=focus))
+
+    return mcp

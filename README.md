@@ -20,11 +20,11 @@ src/claude_ast/cli.py:50  [definite] call  claude_ast.cli.main
 
 ## Status
 
-The **P1 engine is complete** and validated on the Django source tree (2,873
-files / ~60k symbols indexed in seconds; warm re-index ~0.7s). It's built
-engine-first and driven via the CLI; the MCP server (P3) and the type-resolver
-stack (P2) are next. Nothing here calls an LLM — it's fully deterministic and
-local.
+The **P1 engine and the P2 resolver stack are complete**, validated on the Django
+source tree (~17.7k symbols in the `django/` package; warm re-index ~0.3s). The
+**P3 MCP server** (`claude-ast-mcp`) now serves the engine to Claude Code over
+stdio; the live filesystem watcher is what remains. Nothing here calls an LLM —
+it's fully deterministic and local.
 
 ## What it does
 
@@ -68,11 +68,22 @@ claude-ast repo-map [path] [--focus <id>] [--budget N]
 `callers` / `deps` take `--min-confidence` (default `medium`): the consumer's dial from
 the reliable set (definite + typed guesses) down to the `low` name-match heuristics —
 fetched only when the recall is worth the noise. The engine always *reports* every edge
-at honest confidence; the caller decides how much to pull. This is the knob the P3 MCP
-tools will expose so the model can widen its own view on demand.
+at honest confidence; the caller decides how much to pull. This is the knob the MCP tools
+expose so the model can widen its own view on demand.
 
 The index persists at `<root>/.claude-ast/index.db` (self-ignoring;
 `CLAUDE_AST_CACHE_DIR` relocates it centrally).
+
+## MCP server
+
+```console
+claude-ast-mcp [path]                # serve the index to Claude Code over stdio
+```
+
+A FastMCP stdio server — one long-lived process per project — exposing the read-only
+queries above as tools (`find_definition`, `outline`, `find_callers`, `find_dependencies`,
+`repo_map`), returning structured JSON with `--min-confidence` on the relation tools.
+Diagnostics go to stderr; stdout carries the protocol.
 
 ## Development
 
@@ -90,4 +101,4 @@ architecture.
 
 - **Landed since P1:** the **external-reference boundary** — library/stdlib targets surface as `external` nodes on `find_dependencies`, as `definite` edges kept out of ranking (deterministic — import text only). Covers from-import calls, external base classes, and **module-rooted attribute calls** (`os.path.join()`, dotted bases like `abc.ABC`); the external-id scheme is backend-owned, so a JS/TS backend can encode richer coordinates. The lean id-scheme fixes (`#N` disambiguation, single id-assignment authority, no neutral id-parsing) are in; the structured module/member id redesign stays deferred past P2.
 - **P2 (in progress):** the value-typed resolver stack — the `possible`-tier edges that make "report, don't rule" earn its keep. **Landed:** `self.m()` → the enclosing class's member (+ cross-file inherited); annotation-typed receivers (`u: User` → `User.save`); local **construction inference** (`x = User(); x.save()`); **relative-import resolution** (`from ..model import X`); and **package re-export resolution** (`from pkg import X` follows `pkg/__init__` to the real defining module). All value-typed edges are `MEDIUM`/possible. a **builtins** pass (`len` / `Exception` → `definite` external edges); and a capped name-match **heuristic** (`LOW`) for untyped receivers — completing the confidence ladder (definite → medium → low). Plus a **call-site type-observation reporter** — a *definite* `RECEIVES_ARG` edge for the concrete type seen flowing into a parameter (`g(User())` → `g` receives `User`). This reports *what was passed*, not *what a call dispatches to*, so unlike the receiver resolvers it is honestly definite (open-world subclassing can't retract an observation) — the first non-syntactic `definite` edge "report, don't rule" actually permits. Lint-grade and one-hop (constructions only, bare-name functions only, no forward propagation); external-type and method/constructor callees are deferred, so it fires only where in-tree classes flow into in-tree functions. All measured by **resolution metrics**: `claude-ast index` reports coverage + the tier/source split (its own `src/`: **~69% of refs bound**, 365 definite / 33 possible), the loop that drove the builtins win (44% → 68%). **Note:** the originally-planned *confidence merge* (escalate a corroborated edge to `definite`) was dropped as a "report, don't rule" violation — method dispatch is never definite, so the definiteness belongs on the observation, never on the derived dispatch edge. Plus **stdlib stub resolution** — a receiver typed by an *external* stdlib type (`p: Path; p.exists()`) resolves to a `MEDIUM` STUB edge on an external member node, behind a `StubProvider` seam. The member table is **generated-then-frozen**: `tools/python/gen_stubs.py` introspects the *intersection* of callable members across the supported Python range (3.12–3.14) into a committed literal, so the index-time lookup is pure and hermetic (no site-packages, no interpreter drift) — all impurity quarantined in the offline generator. The seam is shaped (`member(type, attr) -> bool`) so an environment-aware provider for third-party stubs (`django-stubs`) can slot in later without touching the resolver; it needs no cache fingerprint because resolution is assembly-time and self-corrects. Two guards detect a stale table (a spec fingerprint + a per-interpreter soundness check; `tools/python/gen_stubs.py check` is the authoritative matrix gate — the generator is one self-orchestrating command, no Make/shell glue). Real recall: `src` 69→**73.8%**, Django +274 edges. **Next:** the env-aware third-party-stub provider (bounded ROI — `django-stubs`' hard types are mypy-plugin-computed, not in `.pyi`); and extending call-site observations to external/method callees.
-- **P3:** the MCP server (stdio, per-project) + the live filesystem watcher. **Landed early:** the **stderr logging seam** (`log.configure()`) — diagnostics (unreadable / unparseable files, with the reason) route to stderr, keeping stdout a clean data/protocol channel; a skipped file is now visible on *every* command instead of being silently dropped by all but `index`.
+- **P3 (in progress):** the MCP server + live watcher. **Landed:** the **stderr logging seam** (`log.configure()` — diagnostics to stderr, so stdout stays a clean data/protocol channel; a skipped file is now visible on *every* command, not silently dropped by all but `index`); and the **MCP server** itself — `claude-ast-mcp [root]`, a FastMCP stdio server (one long-lived process per project) exposing the CLI-validated queries as read-only tools (`find_definition`, `outline`, `find_callers`, `find_dependencies`, `repo_map`), each returning structured JSON, with the `min_confidence` knob on the relation tools so the model widens its own view on demand. Verified end-to-end over a real stdio client (handshake → `list_tools` → tool calls). **Next:** the live filesystem watcher (`watchfiles`) + an incremental `IndexSession` that holds the graph and patches changed files (atomic swap), so the served index stays fresh across edits without a full rebuild.
