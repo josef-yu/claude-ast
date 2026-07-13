@@ -113,6 +113,20 @@ class PythonIndexer:
                 if is_external:
                     externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
+        # `from pkg import submodule` names a MODULE the from-module IMPORT ref doesn't capture.
+        # The import map already resolved each imported name to a qualname; add those that are
+        # in-tree modules, deduped against the spanned from-module edges above (span-less here).
+        seen_imports = {(e.src, e.dst) for e in edges if e.kind is EdgeKind.IMPORT}
+        for fi in files:
+            for target in fi.imports.values():
+                sym = by_id.get(target)
+                if sym is None or sym.kind is not SymbolKind.MODULE:
+                    continue
+                if (fi.module, target) in seen_imports:
+                    continue
+                seen_imports.add((fi.module, target))
+                edge = Edge(fi.module, target, EdgeKind.IMPORT, Resolution.syntactic(), None)
+                edges.append(edge)
         # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges,
         # plus stub-resolved members on external types (`p: Path; p.exists()`) as MEDIUM STUB
         # edges to external nodes. Runs after syntactic binding, so cross-file INHERITS present.

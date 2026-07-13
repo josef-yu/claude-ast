@@ -47,6 +47,20 @@ def test_external_import_is_not_an_in_tree_edge(tmp_path):
     assert not [d for d in index.find_dependencies("m") if d.kind == "import"]
 
 
+def test_from_parent_import_submodule_registers_the_submodule(tmp_path):
+    # `from pkg import base` imports the SUBMODULE pkg.base — not only the package pkg. The
+    # recall gap the eval surfaced: without this, `importers pkg.base` missed such importers.
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "base.py").write_text("class Base:\n    ...\n")
+    (pkg / "user.py").write_text("from pkg import base\n\n\ndef f():\n    return base.Base\n")
+    index = Index.build(tmp_path)
+
+    assert {r.id for r in index.find_importers("pkg.base")} == {"pkg.user"}  # the submodule
+    assert "pkg.user" in {r.id for r in index.find_importers("pkg")}         # and the package
+
+
 def test_function_local_import_is_not_a_module_dependency(tmp_path):
     (tmp_path / "a.py").write_text("def x():\n    return 1\n")
     (tmp_path / "b.py").write_text("def y():\n    from a import x\n    return x()\n")

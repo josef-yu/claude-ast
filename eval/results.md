@@ -142,9 +142,11 @@ is **effort**: one resolved `importers` call vs grep-then-read-to-disambiguate.
 
 **Limitation surfaced (`serializers.base`, 0.83 both):** both arms reported 2 importers the oracle *and* the
 tool missed — `from django.core.serializers import base` style, where the imported name is a submodule. claude-ast's
-`importers` records the *from-module* only, so it has a recall gap on `from parent import submodule`; the agents
-caught the extras by reading. A real, fixable gap (the deferred from-module-granularity choice), and a reminder
-not to trust the tool's set blindly.
+`importers` recorded the *from-module* only, so it had a recall gap on `from parent import submodule`; the agents
+caught the extras by reading. (My oracle shared the same gap, so the 0.83 understated *both* arms equally — the
+tie stands.) **Fixed (this increment):** the resolver now also emits an edge for `from parent import submodule`
+(from the resolved import map, in-tree modules only, deduped, no new persisted refs), so `serializers.base`
+correctly returns all 7 — matching the agents. A reminder that the tool's set wasn't complete, now less so.
 
 ---
 
