@@ -45,8 +45,8 @@ def resolution_metrics(total_refs: int, graph: Graph) -> ResolutionMetrics:
     sites: set[tuple[object, ...]] = set()
     for sym in graph.symbols():
         for e in graph.out_edges(sym.id):
-            if e.kind is EdgeKind.RECEIVES_ARG:
-                continue
+            if e.kind in (EdgeKind.RECEIVES_ARG, EdgeKind.IMPORT):
+                continue  # derived observations / module-dependency plumbing, not ref-bindings
             by_confidence[e.resolution.confidence.value] += 1
             by_source[e.resolution.source.value] += 1
             at = e.at

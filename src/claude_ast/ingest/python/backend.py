@@ -13,7 +13,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
-from ...model import Edge, Resolution, Symbol
+from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from ..product import FileIndex, ResolveResult
 from .binding import bind, external_symbol
 from .callsite import observe_arg_types
@@ -81,6 +81,7 @@ class PythonIndexer:
         (builtins, dynamic, value receivers) still yield nothing.
         """
         all_ids = {sym.id for fi in files for sym in fi.symbols}
+        by_id = {sym.id: sym for fi in files for sym in fi.symbols}
         internal_roots = {fi.module.partition(".")[0] for fi in files}
         # Each module's import map doubles as its re-export table: a name imported into
         # module M is reachable as M.name, so `from pkg import X` follows pkg's __init__.
@@ -95,6 +96,14 @@ class PythonIndexer:
                 if s.parent == fi.module:
                     module_defs.setdefault(s.name, s.id)
             for ref in fi.refs:
+                if ref.kind is EdgeKind.IMPORT:
+                    # module dependency: keep only imports that land on an in-tree module.
+                    target = by_id.get(ref.name)
+                    if target is not None and target.kind is SymbolKind.MODULE:
+                        edges.append(
+                            Edge(ref.src, ref.name, EdgeKind.IMPORT, Resolution.syntactic(), ref.at)
+                        )
+                    continue
                 if ref.local_root:
                     continue  # value receiver — the type resolvers own it, not syntactic binding
                 bound = bind(ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports)
@@ -115,6 +124,5 @@ class PythonIndexer:
             externals.setdefault(ext.id, ext)
         # Call-site observations: `g(User())` -> a definite `g RECEIVES_ARG User` edge. A
         # usage fact, independent of the dispatch passes above (no edges needed as input).
-        by_id = {sym.id: sym for fi in files for sym in fi.symbols}
         edges.extend(observe_arg_types(files, all_ids, internal_roots, reexports, by_id))
         return ResolveResult(edges=edges, externals=list(externals.values()))

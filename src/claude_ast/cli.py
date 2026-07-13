@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .index import Index, store_path
 from .log import configure as configure_logging
-from .model import Confidence
+from .model import Confidence, Span
 from .query import render_repo_map
 
 
@@ -29,6 +29,28 @@ def _add_min_confidence(parser: argparse.ArgumentParser) -> None:
         help="lowest confidence to include — high=definite, medium=+typed, "
         "low=+name-match heuristics (default: medium)",
     )
+
+
+def _add_source(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-s", "--source", action="store_true",
+        help="show the source line at each resolved site (a resolved 'grep' — no false positives)",
+    )
+    parser.add_argument(
+        "--context", type=int, default=0, metavar="N",
+        help="lines of surrounding context to show with --source (default: 0)",
+    )
+
+
+def _read_source(span: Span, context: int) -> list[tuple[int, str]]:
+    """The source line(s) at ``span`` (1-based, ± ``context``), or [] if unreadable."""
+    try:
+        lines = Path(span.file).read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    lo = max(span.line - context, 1)
+    hi = min((span.end_line or span.line) + context, len(lines))
+    return [(n, lines[n - 1]) for n in range(lo, hi + 1)]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -51,11 +73,18 @@ def main(argv: list[str] | None = None) -> int:
     p_callers.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_callers.add_argument("path", nargs="?", default=".", help="project root (default: .)")
     _add_min_confidence(p_callers)
+    _add_source(p_callers)
 
     p_deps = sub.add_parser("deps", help="what a symbol uses")
     p_deps.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_deps.add_argument("path", nargs="?", default=".", help="project root (default: .)")
     _add_min_confidence(p_deps)
+    _add_source(p_deps)
+
+    p_importers = sub.add_parser("importers", help="modules that import a module")
+    p_importers.add_argument("module", help="module id, e.g. pkg.mod")
+    p_importers.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+    _add_source(p_importers)
 
     p_map = sub.add_parser("repo-map", help="ranked skeleton of the codebase")
     p_map.add_argument("path", nargs="?", default=".", help="project root (default: .)")
@@ -74,9 +103,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "outline":
         return _cmd_outline(args.module, Path(args.path))
     if args.command == "callers":
-        return _cmd_relations(args.symbol, Path(args.path), "callers", args.min_confidence)
+        return _cmd_relations(
+            args.symbol, Path(args.path), "callers", args.min_confidence, args.source, args.context
+        )
     if args.command == "deps":
-        return _cmd_relations(args.symbol, Path(args.path), "deps", args.min_confidence)
+        return _cmd_relations(
+            args.symbol, Path(args.path), "deps", args.min_confidence, args.source, args.context
+        )
+    if args.command == "importers":
+        return _cmd_relations(
+            args.module, Path(args.path), "importers", "medium", args.source, args.context
+        )
     if args.command == "repo-map":
         return _cmd_repo_map(Path(args.path), args.focus, args.budget)
     if args.command == "status":
@@ -153,26 +190,33 @@ def _cmd_outline(module: str, root: Path) -> int:
     return 0
 
 
-def _cmd_relations(symbol: str, root: Path, which: str, min_confidence: str) -> int:
+def _cmd_relations(
+    symbol: str, root: Path, which: str, min_confidence: str,
+    source: bool = False, context: int = 0,
+) -> int:
     if not root.exists():
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
     index = Index.build(root)
     conf = Confidence(min_confidence)
-    refs = (
-        index.find_callers(symbol, conf)
-        if which == "callers"
-        else index.find_dependencies(symbol, conf)
-    )
+    if which == "callers":
+        refs = index.find_callers(symbol, conf)
+    elif which == "importers":
+        refs = index.find_importers(symbol)
+    else:
+        refs = index.find_dependencies(symbol, conf)
     if not refs:
-        verb = "callers of" if which == "callers" else "dependencies for"
+        verb = {"callers": "callers of", "importers": "importers of"}.get(which, "dependencies for")
         print(f"no {verb} {symbol!r}", file=sys.stderr)
         return 1
     for r in refs:
         loc = f"{r.at.file}:{r.at.line}  " if r.at else ""
         ext = "  [external]" if r.external else ""
         print(f"{loc}[{r.tier}] {r.kind:<9} {r.id}{ext}")
+        if source and r.at is not None:
+            for line_no, text in _read_source(r.at, context):
+                print(f"    {line_no:>6}  {text}")
     return 0
 
 

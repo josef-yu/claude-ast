@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .ingest import Indexer, default_indexers, ingest_project
 from .ingest.product import CachedFile, FileIndex
-from .model import Confidence, Graph
+from .model import Confidence, EdgeKind, Graph
 from .query import (
     DEFAULT_MIN_CONFIDENCE,
     Definition,
@@ -26,6 +26,7 @@ from .query import (
     find_callers,
     find_definition,
     find_dependencies,
+    find_importers,
     find_references,
     outline,
     repo_map,
@@ -64,7 +65,9 @@ def _assemble(
             graph.add_external(external)
         for edge in resolved.edges:
             graph.add_edge(edge)
-    total_refs = sum(len(fi.refs) for fi in files)
+    # IMPORT refs are module-dependency edges, not the reference-binding the coverage metric
+    # measures, so they're excluded from the denominator (as their edges are from the numerator).
+    total_refs = sum(1 for fi in files for r in fi.refs if r.kind is not EdgeKind.IMPORT)
     return graph, resolution_metrics(total_refs, graph)
 
 
@@ -126,6 +129,9 @@ class Index:
         self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
     ) -> list[Reference]:
         return find_references(self.graph, symbol, min_confidence)
+
+    def find_importers(self, module: str) -> list[Reference]:
+        return find_importers(self.graph, module)
 
     def find_dependencies(
         self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE

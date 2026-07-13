@@ -14,6 +14,7 @@ from .relations import (
     Reference,
     find_callers,
     find_dependencies,
+    find_importers,
     find_references,
 )
 from .repomap import RepoMapEntry, render_repo_map, repo_map
@@ -28,6 +29,7 @@ __all__ = [
     "find_callers",
     "find_definition",
     "find_dependencies",
+    "find_importers",
     "find_references",
     "outline",
     "pagerank",

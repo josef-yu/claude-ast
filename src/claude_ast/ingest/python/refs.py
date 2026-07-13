@@ -41,10 +41,46 @@ def extract_refs(
     tree: ast.Module, module: str, path: str, node_ids: dict[ast.AST, str]
 ) -> tuple[list[RawRef], dict[str, str]]:
     refs: list[RawRef] = []
+    package = _package(module, path)
     # Module-body value binders shadow-protect module-scope value receivers, just as a
     # function's locals do inside it (a `for json in ...` must not bind through `import json`).
     _visit(tree, module, path, refs, [_binder_names(tree.body)], {}, node_ids)
-    return refs, _collect_imports(tree, _package(module, path))
+    refs.extend(_import_refs(tree, module, package, path))
+    return refs, _collect_imports(tree, package)
+
+
+def _import_refs(tree: ast.Module, module: str, package: str, path: str) -> list[RawRef]:
+    """Module-level imports as ``IMPORT`` refs: importing module -> the *from-module* it depends on.
+
+    ``import a.b`` and ``from a.b import c`` both yield the from-module ``a.b`` (relative imports
+    anchored on ``package``); binding keeps only those that resolve to an in-tree module, so the
+    graph carries the internal module-dependency edges — the thing text search can't cheaply give
+    (especially the reverse: *who imports this module*). Module scope only — a function-local import
+    is not a module-wide dependency.
+    """
+    refs: list[RawRef] = []
+
+    def scan(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(
+                child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
+            ):
+                continue  # a separate scope — its imports are not module-wide
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    refs.append(RawRef(module, EdgeKind.IMPORT, alias.name, span(path, child)))
+            elif isinstance(child, ast.ImportFrom):
+                if child.level:  # `from . import x` / `from ..pkg import y`
+                    mod = _relative_module(package, child.level, child.module)
+                else:
+                    mod = child.module or ""
+                if mod:
+                    refs.append(RawRef(module, EdgeKind.IMPORT, mod, span(path, child)))
+            else:
+                scan(child)
+
+    scan(tree)
+    return refs
 
 
 def _visit(

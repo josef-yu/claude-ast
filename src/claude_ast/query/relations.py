@@ -70,6 +70,16 @@ def find_dependencies(
     ]
 
 
+def find_importers(graph: Graph, module: SymbolId) -> list[Reference]:
+    """Modules that import ``module`` — the reverse import graph (inbound IMPORT edges).
+
+    The direction text search does worst: a module's importers spell it many ways
+    (``import a.b`` / ``from a.b import c`` / aliases / relative ``from ..a.b import c`` that
+    doesn't even contain the name), all of which binding already resolved to one qualname.
+    """
+    return [_ref(e.src, e) for e in graph.in_edges(module, EdgeKind.IMPORT)]
+
+
 def _ref(other: SymbolId, edge: Edge, external: bool = False) -> Reference:
     return Reference(
         id=other,

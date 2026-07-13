@@ -78,10 +78,16 @@ claude-ast index <path>              # build/update the index; print a summary
 claude-ast status <path>             # index freshness (cold vs. warm snapshot)
 claude-ast def <name> [path]         # where a name is defined
 claude-ast outline <module> [path]   # a module's symbols
-claude-ast callers <symbol> [path] [--min-confidence high|medium|low]   # who calls a symbol
-claude-ast deps <symbol> [path] [--min-confidence high|medium|low]      # what a symbol uses
+claude-ast callers <symbol> [path] [--min-confidence high|medium|low] [-s/--source]   # who calls a symbol
+claude-ast deps <symbol> [path] [--min-confidence high|medium|low] [-s/--source]      # what a symbol uses
+claude-ast importers <module> [path] [-s/--source]                                    # modules that import a module
 claude-ast repo-map [path] [--focus <id>] [--budget N]
 ```
+
+`-s/--source` (with optional `--context N`) prints the code at each resolved site — a
+"grep with no false positives," the follow-up read folded in. `importers` is the reverse of
+the module import graph (`import a` / `from a import x` / relative imports all resolved to one
+qualname) — the direction text search does worst.
 
 The index persists at `<root>/.claude-ast/index.db` (self-ignoring;
 `CLAUDE_AST_CACHE_DIR` relocates it centrally).
