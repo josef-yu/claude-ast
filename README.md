@@ -39,19 +39,37 @@ One shared AST index, three query families:
 ```
 ingest → resolve (per backend) → store (sqlite + in-mem graph) → query (+ ranker) → server (mcp)
                                         ↑
-                                     watch — feeds changed files back in  [P3]
+                                     watch — feeds changed files back in
 ```
 
 - **`model/`** — the normalized contract (`Symbol` / `Edge` / `Resolution{source, confidence}`) every layer speaks.
 - **`ingest/`** — language backends behind an `Indexer` protocol; `ingest/python/` is the one backend (all `ast` lives there). Produces symbols + syntactic edges.
 - **`store/`** — SQLite snapshot for warm restart + per-file incremental, behind a `Store` protocol.
 - **`query/`** — pure functions over the graph: lookups, relationships, and `repo_map` (confidence-weighted PageRank).
-- **`index.py`** — the `Index` orchestrator (the facade the CLI and later the MCP server use).
+- **`index.py`** — the `Index` orchestrator (and `IndexSession`, the long-lived, patchable view the server serves).
 
 Design principles: **own the whole stack** (our own parser + resolvers; external
 engines can slot in later), **deterministic & local** (no LLM, no external
 service, no API cost), and **report, don't rule** — every edge carries an honest
 confidence tier, so `definite` really means definite.
+
+## Resolution
+
+Every edge is tiered `definite` or `possible` and tagged with how it was found, so
+`definite` really means definite and a guess is never dressed up as a fact. The ladder:
+
+| Tier | Source | Resolves |
+|------|--------|----------|
+| `definite` | syntactic | direct calls, imports (absolute · relative · package re-exports), inheritance |
+| `definite` | external | library/stdlib targets as `external` nodes — from-import calls, module-rooted attributes (`os.path.join`), builtins (`len`); kept out of ranking |
+| `definite` | call-site | `RECEIVES_ARG` — the concrete type flowing into a parameter (`g(User())` → `g` receives `User`); an observation, never a dispatch claim |
+| `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` → the member, followed cross-file through bases and re-exports |
+| `possible` | stub | members on external **stdlib** types (`p: Path; p.exists()`), from a frozen, generated member table |
+| `possible` | heuristic | name-match for untyped receivers, capped so an over-common name stays silent |
+
+`claude-ast index` reports the coverage and tier/source split it achieves (on its own
+`src/`: ~74% of references bound). Consumers dial the floor with `--min-confidence`
+(default `medium`) — the reliable set by default, the `low` heuristics only on demand.
 
 ## CLI
 
@@ -65,12 +83,6 @@ claude-ast deps <symbol> [path] [--min-confidence high|medium|low]      # what a
 claude-ast repo-map [path] [--focus <id>] [--budget N]
 ```
 
-`callers` / `deps` take `--min-confidence` (default `medium`): the consumer's dial from
-the reliable set (definite + typed guesses) down to the `low` name-match heuristics —
-fetched only when the recall is worth the noise. The engine always *reports* every edge
-at honest confidence; the caller decides how much to pull. This is the knob the MCP tools
-expose so the model can widen its own view on demand.
-
 The index persists at `<root>/.claude-ast/index.db` (self-ignoring;
 `CLAUDE_AST_CACHE_DIR` relocates it centrally).
 
@@ -82,8 +94,9 @@ claude-ast-mcp [path]                # serve the index to Claude Code over stdio
 
 A FastMCP stdio server — one long-lived process per project — exposing the read-only
 queries above as tools (`find_definition`, `outline`, `find_callers`, `find_dependencies`,
-`repo_map`), returning structured JSON with `--min-confidence` on the relation tools.
-Diagnostics go to stderr; stdout carries the protocol.
+`repo_map`), returning structured JSON with `min_confidence` on the relation tools. A
+background `watchfiles` thread patches the held index on `.py` edits and atomically swaps
+it in, so a query is never stale. Diagnostics go to stderr; stdout carries the protocol.
 
 ## Development
 
@@ -95,10 +108,24 @@ uv run pyright
 ```
 
 See `CLAUDE.md` for project conventions and `tests/README.md` for the test
-architecture.
+architecture. The frozen stdlib stub table is regenerated with
+`uv run python tools/python/gen_stubs.py` (`check` gates freshness in CI).
 
-## Roadmap
+## Deferred
 
-- **Landed since P1:** the **external-reference boundary** — library/stdlib targets surface as `external` nodes on `find_dependencies`, as `definite` edges kept out of ranking (deterministic — import text only). Covers from-import calls, external base classes, and **module-rooted attribute calls** (`os.path.join()`, dotted bases like `abc.ABC`); the external-id scheme is backend-owned, so a JS/TS backend can encode richer coordinates. The lean id-scheme fixes (`#N` disambiguation, single id-assignment authority, no neutral id-parsing) are in; the structured module/member id redesign stays deferred past P2.
-- **P2 (in progress):** the value-typed resolver stack — the `possible`-tier edges that make "report, don't rule" earn its keep. **Landed:** `self.m()` → the enclosing class's member (+ cross-file inherited); annotation-typed receivers (`u: User` → `User.save`); local **construction inference** (`x = User(); x.save()`); **relative-import resolution** (`from ..model import X`); and **package re-export resolution** (`from pkg import X` follows `pkg/__init__` to the real defining module). All value-typed edges are `MEDIUM`/possible. a **builtins** pass (`len` / `Exception` → `definite` external edges); and a capped name-match **heuristic** (`LOW`) for untyped receivers — completing the confidence ladder (definite → medium → low). Plus a **call-site type-observation reporter** — a *definite* `RECEIVES_ARG` edge for the concrete type seen flowing into a parameter (`g(User())` → `g` receives `User`). This reports *what was passed*, not *what a call dispatches to*, so unlike the receiver resolvers it is honestly definite (open-world subclassing can't retract an observation) — the first non-syntactic `definite` edge "report, don't rule" actually permits. Lint-grade and one-hop (constructions only, bare-name functions only, no forward propagation); external-type and method/constructor callees are deferred, so it fires only where in-tree classes flow into in-tree functions. All measured by **resolution metrics**: `claude-ast index` reports coverage + the tier/source split (its own `src/`: **~69% of refs bound**, 365 definite / 33 possible), the loop that drove the builtins win (44% → 68%). **Note:** the originally-planned *confidence merge* (escalate a corroborated edge to `definite`) was dropped as a "report, don't rule" violation — method dispatch is never definite, so the definiteness belongs on the observation, never on the derived dispatch edge. Plus **stdlib stub resolution** — a receiver typed by an *external* stdlib type (`p: Path; p.exists()`) resolves to a `MEDIUM` STUB edge on an external member node, behind a `StubProvider` seam. The member table is **generated-then-frozen**: `tools/python/gen_stubs.py` introspects the *intersection* of callable members across the supported Python range (3.12–3.14) into a committed literal, so the index-time lookup is pure and hermetic (no site-packages, no interpreter drift) — all impurity quarantined in the offline generator. The seam is shaped (`member(type, attr) -> bool`) so an environment-aware provider for third-party stubs (`django-stubs`) can slot in later without touching the resolver; it needs no cache fingerprint because resolution is assembly-time and self-corrects. Two guards detect a stale table (a spec fingerprint + a per-interpreter soundness check; `tools/python/gen_stubs.py check` is the authoritative matrix gate — the generator is one self-orchestrating command, no Make/shell glue). Real recall: `src` 69→**73.8%**, Django +274 edges. **Next:** the env-aware third-party-stub provider (bounded ROI — `django-stubs`' hard types are mypy-plugin-computed, not in `.pyi`); and extending call-site observations to external/method callees.
-- **P3 (delivery layer — complete):** the MCP server + live watcher. **Landed:** the **stderr logging seam** (`log.configure()` — diagnostics to stderr, so stdout stays a clean data/protocol channel; a skipped file is now visible on *every* command, not silently dropped by all but `index`); and the **MCP server** itself — `claude-ast-mcp [root]`, a FastMCP stdio server (one long-lived process per project) exposing the CLI-validated queries as read-only tools (`find_definition`, `outline`, `find_callers`, `find_dependencies`, `repo_map`), each returning structured JSON, with the `min_confidence` knob on the relation tools so the model widens its own view on demand. Verified end-to-end over a real stdio client (handshake → `list_tools` → tool calls). And the **live watcher** — an `IndexSession` holds the parsed products in memory; `patch()` re-ingests changed files and atomically swaps in a fresh `Index` (GIL-atomic, single-writer / many-readers), re-resolving *globally* so a new file re-binds references in files that didn't themselves change; a `watchfiles` thread feeds it on `.py` edits. Verified live: a file created while the server runs is picked up on the next query, no restart. **Deferred:** persisting session edits back to the snapshot, and a name→importers index to skip the global re-resolve (currently ~0.3s warm — fast enough).
+Landed features are above; these are the known gaps, kept out of scope on purpose:
+
+- **P2 resolvers** — an environment-aware provider for *third-party* stubs (`django-stubs`
+  et al.; bounded ROI, since their hardest types are mypy-plugin-computed and absent from
+  `.pyi`); call-site observations for external and method/constructor callees; stub
+  signatures / return types for chaining (`Path.cwd().exists()`); annotated local
+  assignments (`x: User = ...`) and flow-sensitive reassignment; a decorator-aware fix for
+  the `@staticmethod`-named-`self` edge.
+- **id scheme** — the structured module/member id redesign (the lean fixes are in; the
+  cross-file collision guard is dormant — 0 hits across Django's 17.7k symbols).
+- **P3 refinements** — persisting live-session edits back to the snapshot; a name→importers
+  index to skip the global re-resolve on patch (~0.3s warm today); a rank cache invalidated
+  on swap.
+- **Second language** — a JS/TS backend. The seam is already built for it: `ast` is confined
+  to `ingest/python/`, external ids are backend-owned, and tooling is partitioned under
+  `tools/<language>/`.
