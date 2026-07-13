@@ -62,3 +62,51 @@ Give the tool the tasks it's actually *for*:
 2. **Set-valued, objectively scored** — anchor to real rename/deprecate/move commits that touched many
    sites; ground truth = the patch's actual affected set; score precision/recall/F1.
 3. **More trials + tickets** to lift signal above noise.
+
+---
+
+# Eval results — v2 (discovery: find-all-callers)
+
+**Verdict: a clean tie — treatment and control both scored perfect F1, at equal token cost.**
+
+## Setup
+
+One impact-analysis task: *"`django_file_prefixes` (moved in #37142) is being relocated — list every
+`django/` (non-test) file that references it."* The target symbol is named; its **callers are not**
+(the agent must discover them). Set-valued, so scored **deterministically** (file-set precision/recall/F1,
+no judge). N=4/arm, worktree at the fix's parent commit, treatment (claude-ast) vs control (grep).
+
+## Results (mean of 4 / arm; ground truth = 15 files)
+
+| Metric | Treatment | Control |
+|---|---|---|
+| precision / recall / **F1** | 1.0 / 1.0 / **1.00** | 1.0 / 1.0 / **1.00** |
+| output tokens / agent | 6,775 | 6,654 |
+| tool-calls / files-read | 4.75 / 1.5 | 4.0 / 1.5 |
+
+Both arms found all 15 files, every trial, at ~equal cost. As predicted: `django_file_prefixes` is a
+**distinctive** name, so one `grep` returns the exact set with no false positives — nothing for symbol
+resolution to add.
+
+---
+
+# Synthesis (v1 + v2)
+
+Across *planning* (v1) and *find-all-callers* (v2), **claude-ast did not improve an LLM agent's accuracy
+or efficiency on Django** — v1 cost +20% for no quality gain; v2 tied on both. The reason is consistent:
+**LLM + grep is already sufficient** when symbols are distinctively named and the target is named. The
+tool's theoretical edge — resolving *ambiguous* names, avoiding grep false-positives — is never exercised,
+because tasks with objective (patch-derived) ground truth inherently involve distinctive names.
+
+**Scope this honestly.** The finding is *"marginal on Django for batch LLM-agent tasks,"* not *"the tool
+is wrong."* What these experiments do **not** measure, and where value may still exist:
+- **Ambiguous-name disambiguation** — `callers Q.check` vs `grep ".check("` (drowns in false positives).
+  Even here a capable LLM likely disambiguates by reading, so the edge, if any, is *reduced effort*, not a
+  different answer. This needs *curated* ground truth (no patch gives it) — the open v3.
+- **Confidence calibration** — the `definite`/`possible` tiering; untested (tasks were binary).
+- **Messier / less-conventionally-named codebases** than Django, where text search is genuinely unreliable.
+- **Interactive** (MCP, human-in-loop) use, vs the batch CLI harness here.
+
+Bottom line: on a large but *well-structured* codebase, an LLM's own text-search competence sets a high
+bar the tool didn't clear in these tasks. The differentiator matters most where text search fails — which
+Django's clean conventions rarely trigger.
