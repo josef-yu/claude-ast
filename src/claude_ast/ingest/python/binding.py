@@ -9,7 +9,14 @@ submodule. The import binds ``X`` at ``pkg.X``, but the symbol lives where it is
 
 from __future__ import annotations
 
+import builtins
+
 from ...model import Span, Symbol, SymbolKind
+
+# Python's builtin names — a name that is neither defined nor imported here, but is a
+# builtin, resolves to it (Python's name lookup falls back to builtins). Computed from
+# the running interpreter, which the tool pins to a modern Python; builtins are stable.
+_BUILTINS = frozenset(dir(builtins))
 
 
 def bind(
@@ -24,7 +31,9 @@ def bind(
 
     Handles a bare name and an attribute chain (``os.path.join``): the root is bound
     via the module's own defs or its imports, then the trailing attribute path is
-    appended and classified.
+    appended and classified. A name that resolves to nothing in-scope but is a Python
+    builtin (``len``, ``Exception``, ``str.join``) binds to a ``definite`` external
+    ``builtins.*`` node — a real reference, checked last so a local ``def len`` wins.
     """
     if name in module_defs:
         return _classify(module_defs[name], all_ids, internal_roots, reexports)
@@ -35,6 +44,8 @@ def bind(
         base = module_defs.get(root) or imports.get(root)
         if base is not None:
             return _classify(f"{base}.{rest}", all_ids, internal_roots, reexports)
+    if root in _BUILTINS:
+        return f"builtins.{name}", True
     return None
 
 

@@ -21,3 +21,8 @@ def build_path(name: str) -> str:
 def working_dir() -> str:
     """Calls an external function through a module attribute (`os.getcwd`)."""
     return os.getcwd()
+
+
+def count(items) -> int:
+    """Calls the `len` builtin — a definite external edge to builtins.len."""
+    return len(items)

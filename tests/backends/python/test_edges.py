@@ -253,3 +253,37 @@ def test_call_in_a_default_argument_is_attributed_to_the_enclosing_scope(tmp_pat
     index = Index.build(tmp_path)
     # the default `make()` runs at module scope and must not be dropped
     assert "m.make" in {r.id for fam in ("m",) for r in index.find_dependencies(fam)}
+
+
+def test_builtin_call_binds_to_a_definite_external_node(tmp_path):
+    (tmp_path / "m.py").write_text("def size(items):\n    return len(items)\n")
+    index = Index.build(tmp_path)
+
+    ext = [d for d in index.find_dependencies("m.size") if d.id == "builtins.len"]
+    assert ext and ext[0].tier == "definite" and ext[0].external
+    assert index.graph.is_external("builtins.len")
+
+
+def test_a_local_def_shadows_the_builtin(tmp_path):
+    # A module-level `def len` shadows the builtin -> bind in-tree, not to builtins.len.
+    (tmp_path / "m.py").write_text("def len(x):\n    ...\n\n\ndef use():\n    return len(0)\n")
+    index = Index.build(tmp_path)
+
+    assert "m.use" in {r.id for r in index.find_callers("m.len")}
+    assert not index.graph.is_external("builtins.len")
+
+
+def test_builtin_base_class_is_an_external_inherits_edge(tmp_path):
+    (tmp_path / "m.py").write_text("class MyError(Exception):\n    ...\n")
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.kind, d.external) for d in index.find_dependencies("m.MyError")}
+    assert ("builtins.Exception", "inherits", True) in deps
+
+
+def test_builtin_type_attribute_call_binds_external(tmp_path):
+    (tmp_path / "m.py").write_text("def combine(parts):\n    return str.join(',', parts)\n")
+    index = Index.build(tmp_path)
+
+    deps = {(d.id, d.external) for d in index.find_dependencies("m.combine")}
+    assert ("builtins.str.join", True) in deps

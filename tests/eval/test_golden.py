@@ -90,6 +90,13 @@ def test_module_attribute_call_resolves_to_an_external_edge(index: Index) -> Non
     assert ("os.getcwd", "call", True) in {(d.id, d.kind, d.external) for d in deps}
 
 
+def test_builtin_call_resolves_to_a_definite_external_edge(index: Index) -> None:
+    deps = index.find_dependencies("sample_pkg.externals.count")
+    assert ("builtins.len", "call", True, "definite") in {
+        (d.id, d.kind, d.external, d.tier) for d in deps
+    }
+
+
 def test_self_call_resolves_to_the_class_member_as_possible(index: Index) -> None:
     # `self.save()` in Base.persist -> Base.save, at the possible tier (value-typed).
     deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.core.Base.persist")}
