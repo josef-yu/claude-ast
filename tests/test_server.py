@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_ast.index import Index
+from claude_ast.index import Index, IndexSession
 from claude_ast.server.__main__ import main
 from claude_ast.server.app import _definition, _outline, _ref, build_server
 
@@ -50,8 +50,8 @@ def test_external_dependency_is_flagged(index: Index) -> None:
     assert join["external"] is True and join["tier"] == "definite"
 
 
-def test_build_server_registers_tools_without_touching_stdout(index: Index, capsys) -> None:
-    server = build_server(index)
+def test_build_server_registers_tools_without_touching_stdout(capsys) -> None:
+    server = build_server(IndexSession(FIXTURES, use_store=False))
     assert server.name == "claude-ast"
     assert capsys.readouterr().out == ""  # nothing leaked onto the protocol channel
 

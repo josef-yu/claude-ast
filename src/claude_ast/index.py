@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .ingest import Indexer, default_indexers, ingest_project
+from .ingest.product import CachedFile, FileIndex
 from .model import Confidence, Graph
 from .query import (
     DEFAULT_MIN_CONFIDENCE,
@@ -40,6 +41,31 @@ def store_path(root: Path) -> Path:
         key = hashlib.sha256(str(root.resolve()).encode()).hexdigest()[:16]
         return Path(override) / key / "index.db"
     return root / ".claude-ast" / "index.db"
+
+
+def _assemble(
+    files: Sequence[FileIndex], backends: Sequence[Indexer]
+) -> tuple[Graph, ResolutionMetrics]:
+    """Build the in-memory graph from per-file products: symbols first, then each backend's edges.
+
+    The language-neutral assembly shared by the one-shot ``Index.build`` and the long-lived
+    ``IndexSession``. Edges are rebuilt from the persisted products on every assembly — the
+    reason warm == cold, and the reason a session patch resolves *globally* (a new file can
+    newly-bind references in files that did not themselves change).
+    """
+    graph = Graph()
+    for fi in files:
+        for symbol in fi.symbols:
+            graph.add_symbol(symbol)
+    for backend in backends:
+        backend_files = [fi for fi in files if Path(fi.path).suffix in backend.extensions]
+        resolved = backend.resolve(backend_files)
+        for external in resolved.externals:
+            graph.add_external(external)
+        for edge in resolved.edges:
+            graph.add_edge(edge)
+    total_refs = sum(len(fi.refs) for fi in files)
+    return graph, resolution_metrics(total_refs, graph)
 
 
 class Index:
@@ -82,21 +108,7 @@ class Index:
             if store is not None:
                 store.close()  # commit + release even if ingest raised
 
-        graph = Graph()
-        for file_index in result.files:
-            for symbol in file_index.symbols:
-                graph.add_symbol(symbol)
-        for backend in backends:
-            backend_files = [
-                fi for fi in result.files if Path(fi.path).suffix in backend.extensions
-            ]
-            resolved = backend.resolve(backend_files)
-            for external in resolved.externals:
-                graph.add_external(external)
-            for edge in resolved.edges:
-                graph.add_edge(edge)
-        total_refs = sum(len(fi.refs) for fi in result.files)
-        metrics = resolution_metrics(total_refs, graph)
+        graph, metrics = _assemble(result.files, backends)
         return cls(graph, root, skipped=result.skipped, metrics=metrics)
 
     def find_definition(self, name: str) -> list[Definition]:
@@ -122,3 +134,48 @@ class Index:
 
     def repo_map(self, budget: int = 2000, focus: str | None = None) -> list[RepoMapEntry]:
         return repo_map(self.graph, budget, focus)
+
+
+class IndexSession:
+    """A long-lived, patchable index — the live view the MCP server serves and the watcher feeds.
+
+    Holds the parsed per-file products in memory and rebuilds the graph on demand. ``patch``
+    re-ingests changed files (unchanged ones reused by their ``(mtime, size)`` stamp) and
+    atomically swaps in a fresh ``Index``. Single-writer (the watcher / patch caller),
+    many-readers (query handlers read ``current``): the swap is a plain attribute assignment —
+    atomic under the GIL — so a reader always sees a fully-built index, never a half-patched one.
+
+    Because assembly re-resolves every edge (``_assemble``), a patch is *globally* correct: adding
+    a file can newly-bind references that live in files which did not themselves change. It is
+    warm-seeded once from the snapshot; edits during the session are held in memory (persisting
+    them back is a later refinement — a restart re-parses only what the snapshot shows as changed).
+    """
+
+    __slots__ = ("root", "current", "_backends", "_cache")
+
+    def __init__(
+        self, root: Path, indexers: Sequence[Indexer] | None = None, use_store: bool = True
+    ) -> None:
+        self.root = root.resolve()
+        self._backends = tuple(indexers) if indexers is not None else default_indexers()
+        self._cache: dict[str, CachedFile] = {}
+        if use_store:
+            store = SqliteStore(store_path(self.root))
+            try:
+                self._cache = store.load()  # warm seed; the initial patch re-parses what changed
+            finally:
+                store.close()
+        self.current = self._rebuild()
+
+    def _rebuild(self) -> Index:
+        result = ingest_project(self.root, self._backends, cache=self._cache)
+        # keep the in-memory cache in step: drop deletions, fold in fresh parses.
+        self._cache = {p: c for p, c in self._cache.items() if p in result.present}
+        self._cache.update(result.fresh)
+        graph, metrics = _assemble(result.files, self._backends)
+        return Index(graph, self.root, skipped=result.skipped, metrics=metrics)
+
+    def patch(self) -> Index:
+        """Re-ingest changed files and atomically swap in a fresh index; returns the new view."""
+        self.current = self._rebuild()
+        return self.current

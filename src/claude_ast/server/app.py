@@ -16,7 +16,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from ..index import Index
+from ..index import Index, IndexSession
 from ..model import Confidence
 from ..query import Reference, render_repo_map
 
@@ -60,37 +60,42 @@ def _ref(r: Reference) -> dict:
     }
 
 
-def build_server(index: Index) -> FastMCP:
-    """Register the read-only navigation tools over ``index`` and return the FastMCP app."""
+def build_server(session: IndexSession) -> FastMCP:
+    """Register the read-only navigation tools over ``session`` and return the FastMCP app.
+
+    Tools read ``session.current`` at call time, so a watcher patch is picked up on the next
+    query — the served view is always fresh without rebuilding the app.
+    """
     mcp = FastMCP("claude-ast")
 
     @mcp.tool()
     def find_definition(name: str) -> list[dict]:
         """Where a name is defined. `name` is a bare name (`User`) or a qualified id
         (`pkg.mod.User`); a bare name returns every symbol with that short name."""
-        return _definition(index, name)
+        return _definition(session.current, name)
 
     @mcp.tool()
     def outline(module: str) -> list[dict]:
         """A module's own symbols in source order, each with a nesting `depth` and signature."""
-        return _outline(index, module)
+        return _outline(session.current, module)
 
     @mcp.tool()
     def find_callers(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
         """Symbols that call `symbol`. Each result carries a `tier` (definite | possible);
         widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
-        return [_ref(r) for r in index.find_callers(symbol, Confidence(min_confidence))]
+        return [_ref(r) for r in session.current.find_callers(symbol, Confidence(min_confidence))]
 
     @mcp.tool()
     def find_dependencies(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
         """What `symbol` uses — calls, inheritance, and library targets (flagged `external`).
         Widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
-        return [_ref(r) for r in index.find_dependencies(symbol, Confidence(min_confidence))]
+        deps = session.current.find_dependencies(symbol, Confidence(min_confidence))
+        return [_ref(r) for r in deps]
 
     @mcp.tool()
     def repo_map(focus: str | None = None, budget: int = 2000) -> str:
         """A ranked, token-budgeted skeleton of the codebase, optionally biased toward a
         `focus` symbol/module id. `budget` caps the approximate token size."""
-        return render_repo_map(index.repo_map(budget=budget, focus=focus))
+        return render_repo_map(session.current.repo_map(budget=budget, focus=focus))
 
     return mcp
