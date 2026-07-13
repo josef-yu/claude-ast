@@ -29,6 +29,14 @@ class RawRef:
     local ``x = Foo()`` construction — the fact the type resolvers bind; ``None`` when
     there is no such fact. ``receiver_inferred`` distinguishes the source: True for a
     construction inference (``INFERENCE``), False for a declared annotation.
+
+    ``arg_types`` records, on a name-callee ``CALL`` ref (``g(User())``), the concrete
+    types observed flowing into the callee's positional parameters: element *k* is the
+    constructed class name at arg *k* (``User`` for a ``User()`` construction), else
+    ``None``. It is a *usage observation*, not a dispatch inference — the call-site pass
+    turns each into a definite ``RECEIVES_ARG`` edge (see ``callsite.py``). Constructions
+    only, positional only, truncated at the first ``*args`` (positional alignment breaks
+    past a splat), a shadowed constructor name dropped; trailing ``None``s are trimmed.
     """
 
     src: SymbolId  # the enclosing symbol making the reference
@@ -38,6 +46,7 @@ class RawRef:
     local_root: bool = False
     receiver_type: str | None = None
     receiver_inferred: bool = False
+    arg_types: tuple[str | None, ...] = ()
 
 
 @dataclass(slots=True)

@@ -34,3 +34,12 @@ def bootstrap() -> int:
 def dispatch(obj) -> None:
     """Untyped receiver: name-matches `persist` (heuristic, LOW) -> Base.persist."""
     obj.persist()
+
+
+def consume(record) -> None:
+    """Untyped parameter; call sites report the concrete type they pass in."""
+
+
+def feed() -> None:
+    """Passes a constructed ``Service`` -> `consume` RECEIVES_ARG Service (a definite observation)."""
+    consume(Service())

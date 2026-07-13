@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import builtins
 
-from ...model import Span, Symbol, SymbolKind
+from ...model import Span, Symbol, SymbolId, SymbolKind
 
 # Python's builtin names — a name that is neither defined nor imported here, but is a
 # builtin, resolves to it (Python's name lookup falls back to builtins). Computed from
@@ -88,6 +88,40 @@ def follow_reexports(target: str, all_ids: set[str], reexports: dict[str, dict[s
             break
         target = nxt
     return target
+
+
+def resolve_type_name(
+    name: str,
+    module_defs: dict[str, str],
+    imports: dict[str, str],
+    all_ids: set[SymbolId],
+    reexports: dict[str, dict[str, str]],
+    by_id: dict[SymbolId, Symbol],
+) -> SymbolId | None:
+    """A type name in a file's scope -> its in-tree CLASS id, or ``None``.
+
+    Resolves a bare or dotted name (``User``, ``models.User``) through the file's own
+    definitions and imports — the same inputs syntactic binding uses, including package
+    re-exports — and keeps it only if it lands on an in-tree class. An external or
+    non-class target is ``None``: the members of an unindexed class can't be looked up,
+    and a name that resolves to a function/variable is not a type.
+
+    Shared by the value resolvers (an annotated/constructed receiver's type) and the
+    call-site pass (an observed argument's constructor), so one authority decides what a
+    type name means — the seam holds: no caller parses a dotted id itself.
+    """
+    target = module_defs.get(name) or imports.get(name)
+    if target is None:
+        root, _, rest = name.partition(".")
+        if rest:
+            base = module_defs.get(root) or imports.get(root)
+            if base is not None:
+                target = f"{base}.{rest}"
+    if target is None:
+        return None
+    target = follow_reexports(target, all_ids, reexports)
+    sym = by_id.get(target)
+    return target if sym is not None and sym.kind is SymbolKind.CLASS else None
 
 
 def external_symbol(qualname: str) -> Symbol:

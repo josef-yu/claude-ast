@@ -9,6 +9,29 @@ annotation / inference) lives in test_resolvers.py.
 from claude_ast.index import Index
 
 
+def test_a_lambda_param_shadows_an_import(tmp_path):
+    # `lambda os: os.getcwd()` — `os` is the lambda's parameter, so the attribute call must
+    # NOT bind to the imported `os` module. A lambda is a scope whose params shadow, like a
+    # def's; without that the shadowed name forges a confidently-wrong external edge.
+    (tmp_path / "m.py").write_text("import os\n\n\ndef f():\n    return lambda os: os.getcwd()\n")
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.f") == []
+
+
+def test_a_reassigned_global_shadows_an_import(tmp_path):
+    # `global os; os = get()` rebinds `os` to an unknown value, so `os.getcwd()` must NOT
+    # bind to the stdlib module (only the legit `get()` call survives).
+    (tmp_path / "m.py").write_text(
+        "import os\n\n\n"
+        "def get():\n    return 1\n\n\n"
+        "def f():\n    global os\n    os = get()\n    return os.getcwd()\n"
+    )
+    index = Index.build(tmp_path)
+    deps = {d.id for d in index.find_dependencies("m.f")}
+    assert "os.getcwd" not in deps
+    assert "m.get" in deps  # the reassignment's RHS still binds
+
+
 def test_same_qualname_sibling_owns_its_own_edges(tmp_path):
     # The `#2` (else-branch) def must carry its OWN edges, not have them
     # misattributed to the first def: reference extraction consumes the same

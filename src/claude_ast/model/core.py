@@ -92,6 +92,21 @@ class Resolution:
         return cls(ResolutionSource.ANNOTATION, Confidence.MEDIUM)
 
     @classmethod
+    def observed(cls) -> Resolution:
+        """A type observed flowing into a parameter at a call site (``g(User())`` -> g gets User).
+
+        HIGH/definite — and honestly so, unlike the dispatch resolvers above. This edge
+        reports *what was passed*, not *what a method call dispatches to*: a concrete
+        construction at a real call site is a syntactic fact, and open-world subclassing
+        cannot falsify it (an unobserved caller passing a subclass only *adds* another
+        observation, it never retracts this one). The definiteness lives on the
+        observation itself — never laundered onto a derived receiver-dispatch edge, which
+        stays MEDIUM. That distinction is what keeps this the first non-syntactic definite
+        edge that "report, don't rule" actually permits.
+        """
+        return cls(ResolutionSource.CALLSITE, Confidence.HIGH)
+
+    @classmethod
     def heuristic(cls) -> Resolution:
         """A name-match guess for an untyped receiver (``obj.save()`` -> every ``*.save``).
 
@@ -120,6 +135,7 @@ class EdgeKind(StrEnum):
     CALL = "call"
     REFERENCE = "reference"  # an attribute read / name use that isn't a call
     INHERITS = "inherits"
+    RECEIVES_ARG = "receives-arg"  # a call site was observed passing dst (a type) into src's param
 
 
 @dataclass(slots=True)

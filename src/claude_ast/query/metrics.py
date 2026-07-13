@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from ..model import Graph
+from ..model import EdgeKind, Graph
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +34,19 @@ def resolution_metrics(total_refs: int, graph: Graph) -> ResolutionMetrics:
     ``bound_refs`` counts distinct call sites (``src, kind, span``), so heuristic
     multiplicity — many candidate edges for one site — collapses to one bound site and
     coverage stays within 0..1 even when the resolver stack fans out.
+
+    ``RECEIVES_ARG`` edges are skipped: they are call-site *observations* derived from an
+    already-counted ``CALL`` ref's arguments, not bindings of a reference of their own, so
+    counting their sites would inflate ``bound_refs`` past ``total_refs``. This metric
+    measures reference-binding coverage; the observed-type layer is a separate capability.
     """
     by_confidence: Counter[str] = Counter()
     by_source: Counter[str] = Counter()
     sites: set[tuple[object, ...]] = set()
     for sym in graph.symbols():
         for e in graph.out_edges(sym.id):
+            if e.kind is EdgeKind.RECEIVES_ARG:
+                continue
             by_confidence[e.resolution.confidence.value] += 1
             by_source[e.resolution.source.value] += 1
             at = e.at

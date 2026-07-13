@@ -14,6 +14,9 @@ forge a wrong edge) and left for the P2 type resolvers. When the receiver's type
 known in scope — a parameter annotation or a local ``x = Foo()`` construction — the
 ref carries it (``receiver_type``, with ``receiver_inferred`` telling the two apart)
 so the type resolvers can bind it. A bare local call (``x()``) is still skipped.
+A name-callee call also records the concrete types seen at its positional arguments
+(``g(User())`` -> ``arg_types=("User",)``), which the call-site pass turns into definite
+``RECEIVES_ARG`` observations — constructions only, so the observed type is exact.
 
 Scope handling is conservative in service of honest confidence: before binding a
 bare name we skip it if it is bound as a local anywhere in an enclosing function
@@ -108,12 +111,37 @@ def _visit(
             _visit(stmt, fid, path, refs, inner, inner_types, node_ids)
         return
 
+    if isinstance(node, ast.Lambda):
+        # A lambda is a scope: its parameters shadow outer names in its body, exactly as a
+        # def's do. Without this branch `_visit` recurses into the body carrying the ENCLOSING
+        # locals, so a lambda param named like a module symbol (`lambda User: g(User())`) is
+        # not seen as a local — and the shadowed name would forge a wrong edge, including a
+        # confidently-wrong *definite* RECEIVES_ARG observation. Defaults evaluate in the
+        # enclosing scope; the body in the lambda's own. (Lambda params carry no annotations,
+        # so they add no receiver types — they only drop shadowed outer ones.)
+        for default in (*node.args.defaults, *node.args.kw_defaults):
+            if default is not None:
+                _visit(default, enclosing, path, refs, locals_, types, node_ids)
+        lambda_locals = frozenset(a.arg for a in _all_args(node.args))
+        inner = [*locals_, lambda_locals]
+        inner_types = {n: v for n, v in types.items() if n not in lambda_locals}
+        _visit(node.body, enclosing, path, refs, inner, inner_types, node_ids)
+        return
+
     if isinstance(node, ast.Call):
         callee = _dotted_name(node.func)
         if callee is not None:
             root = callee.partition(".")[0]
             if not _local(root, locals_):
-                refs.append(RawRef(enclosing, EdgeKind.CALL, callee, span(path, node.func)))
+                refs.append(
+                    RawRef(
+                        enclosing,
+                        EdgeKind.CALL,
+                        callee,
+                        span(path, node.func),
+                        arg_types=_arg_types(node, locals_),
+                    )
+                )
             elif "." in callee:
                 # value receiver (self.save(), u.save()): record for the type resolvers,
                 # flagged so syntactic binding never mis-resolves a shadowing local, and
@@ -154,6 +182,32 @@ def _dotted_name(node: ast.expr) -> str | None:
         parts.reverse()
         return ".".join(parts)
     return None
+
+
+def _arg_types(node: ast.Call, locals_: list[frozenset[str]]) -> tuple[str | None, ...]:
+    """The concrete types observed flowing into a call's positional parameters.
+
+    Element *k* is the class name of a bare-name construction at arg *k* (``User`` for
+    ``User()``), else ``None``. Constructions only — a value observed *exactly*, so the
+    edge it feeds is honestly definite. Deferred (as ``None``, or by truncation): a
+    dotted constructor (``mod.User()``), a factory/return value (``make()`` — filtered
+    later when the name doesn't bind to a class), a shadowed constructor name, and every
+    positional past the first ``*args`` (a splat destroys index↔param alignment). Trailing
+    ``None``s are trimmed so a call passing no constructions stores the empty tuple.
+    """
+    names: list[str | None] = []
+    for arg in node.args:
+        if isinstance(arg, ast.Starred):
+            break  # positional alignment is lost past a splat — defer the rest
+        ctor: str | None = None
+        if isinstance(arg, ast.Call):
+            dotted = _dotted_name(arg.func)
+            if dotted is not None and "." not in dotted and not _local(dotted, locals_):
+                ctor = dotted
+        names.append(ctor)
+    while names and names[-1] is None:
+        names.pop()
+    return tuple(names)
 
 
 def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
@@ -217,10 +271,14 @@ def _function_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
 
     Includes parameters, all binding targets in the body, and nested def/class
     names, but does not descend into nested scopes (their locals are their own).
-    ``global``/``nonlocal`` names are excluded — they refer outward.
+    A bare ``global``/``nonlocal x`` binds nothing, so ``x`` is absent here and refers
+    outward — an outer import/class binds normally. But ``global x; x = ...`` *reassigns*
+    that outer name to an unknown value, so ``x`` IS captured as a local shadow (via the
+    assignment): else a rebound import/class name would forge a confidently-wrong edge
+    (``global os; os = f(); os.g()`` must not bind ``os`` to the stdlib module, and
+    ``global User; User = 5; h(User())`` must not report ``User`` as a passed type).
     """
     names: set[str] = {arg.arg for arg in _all_args(fn.args)}
-    declared_outer: set[str] = set()
 
     def process(node: ast.AST) -> None:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
@@ -228,7 +286,7 @@ def _function_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
         elif isinstance(node, ast.Lambda):
             pass  # lambda body is a separate scope
         elif isinstance(node, ast.Global | ast.Nonlocal):
-            declared_outer.update(node.names)
+            pass  # binds nothing itself; a reassignment `x = ...` is caught as an Assign below
         else:
             _add_bound(node, names)
             for child in ast.iter_child_nodes(node):
@@ -236,7 +294,7 @@ def _function_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[st
 
     for stmt in fn.body:
         process(stmt)
-    return frozenset(names - declared_outer)
+    return frozenset(names)
 
 
 def _binder_names(body: list[ast.stmt]) -> frozenset[str]:

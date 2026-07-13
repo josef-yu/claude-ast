@@ -27,7 +27,7 @@ from collections.abc import Sequence
 
 from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
-from .binding import follow_reexports
+from .binding import resolve_type_name
 
 
 def resolve_value_types(
@@ -69,7 +69,7 @@ def resolve_value_types(
                 class_id = _self_class(ref.src, by_id)
                 resolution = Resolution.inferred()
             elif ref.receiver_type is not None:
-                class_id = _resolve_type_name(
+                class_id = resolve_type_name(
                     ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
                 )
                 resolution = (
@@ -114,36 +114,6 @@ def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None
         return None
     cls = by_id.get(method.parent) if method.parent else None
     return cls.id if cls is not None and cls.kind is SymbolKind.CLASS else None
-
-
-def _resolve_type_name(
-    name: str,
-    module_defs: dict[str, str],
-    imports: dict[str, str],
-    all_ids: set[SymbolId],
-    reexports: dict[str, dict[str, str]],
-    by_id: dict[SymbolId, Symbol],
-) -> SymbolId | None:
-    """A type name in a file's scope -> its in-tree CLASS id, or None.
-
-    Resolves a bare or dotted annotation name (``User``, ``models.User``) through the
-    file's own definitions and imports — the same inputs syntactic binding uses,
-    including package re-exports — and keeps it only if it lands on an in-tree class.
-    An external or non-class target is None: the members of an unindexed class can't be
-    looked up here.
-    """
-    target = module_defs.get(name) or imports.get(name)
-    if target is None:
-        root, _, rest = name.partition(".")
-        if rest:
-            base = module_defs.get(root) or imports.get(root)
-            if base is not None:
-                target = f"{base}.{rest}"
-    if target is None:
-        return None
-    target = follow_reexports(target, all_ids, reexports)
-    sym = by_id.get(target)
-    return target if sym is not None and sym.kind is SymbolKind.CLASS else None
 
 
 # A value CALL must resolve to something callable — a method, a nested function, or a

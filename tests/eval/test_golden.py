@@ -128,6 +128,16 @@ def test_constructed_receiver_resolves_via_inference(index: Index) -> None:
     assert ("sample_pkg.service.Service.run", "call", "possible") in deps
 
 
+def test_call_site_reports_the_passed_type_as_a_definite_observation(index: Index) -> None:
+    # feed() passes `Service()` into consume() -> `consume RECEIVES_ARG Service`, a definite
+    # observation (what was passed), distinct from the possible-tier dispatch resolvers.
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.service.consume")}
+    assert ("sample_pkg.service.Service", "receives-arg", "definite") in deps
+    # the reverse view: "where does Service flow in as an argument type?"
+    refs = {(r.id, r.kind) for r in index.find_references("sample_pkg.service.Service")}
+    assert ("sample_pkg.service.consume", "receives-arg") in refs
+
+
 def test_resolution_metrics_summarize_the_index(index: Index) -> None:
     m = index.metrics
     assert m.total_refs > 0 and 0 < m.bound_refs <= m.total_refs
@@ -189,3 +199,12 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     run_callers = {"sample_pkg.service.handle", "sample_pkg.service.bootstrap"}
     assert callers(cold_index, "sample_pkg.service.Service.run") == run_callers
     assert callers(warm_index, "sample_pkg.service.Service.run") == run_callers
+
+    # ...and the definite call-site observation, reproduced only if RawRef.arg_types
+    # round-trips through the store (else the warm RECEIVES_ARG edge vanishes).
+    def receives(index: Index, sym: str) -> set[str]:
+        return {d.id for d in index.find_dependencies(sym) if d.kind == "receives-arg"}
+
+    consume_gets = {"sample_pkg.service.Service"}
+    assert receives(cold_index, "sample_pkg.service.consume") == consume_gets
+    assert receives(warm_index, "sample_pkg.service.consume") == consume_gets

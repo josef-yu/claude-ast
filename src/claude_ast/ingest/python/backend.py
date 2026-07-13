@@ -15,6 +15,7 @@ from pathlib import Path
 from ...model import Edge, Resolution, Symbol
 from ..product import FileIndex, ResolveResult
 from .binding import bind, external_symbol
+from .callsite import observe_arg_types
 from .common import module_qualname
 from .refs import extract_refs
 from .symbols import extract_symbols
@@ -92,6 +93,10 @@ class PythonIndexer:
                     externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
         # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges.
-        # Runs last, so the cross-file INHERITS edges it walks are already in `edges`.
+        # Runs after syntactic binding, so the cross-file INHERITS edges it walks are present.
         edges.extend(resolve_value_types(files, edges, reexports))
+        # Call-site observations: `g(User())` -> a definite `g RECEIVES_ARG User` edge. A
+        # usage fact, independent of the dispatch passes above (no edges needed as input).
+        by_id = {sym.id: sym for fi in files for sym in fi.symbols}
+        edges.extend(observe_arg_types(files, all_ids, internal_roots, reexports, by_id))
         return ResolveResult(edges=edges, externals=list(externals.values()))
