@@ -38,6 +38,10 @@ extend-exclude = ["tests/fixtures"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+# Generated frozen stub table (tools/gen_stubs.py): dense one-line frozenset literals.
+"src/claude_ast/ingest/python/_stub_table.py" = ["E501"]
+
 [tool.pyright]
 include = ["src", "tests"]
 exclude = ["tests/fixtures"]

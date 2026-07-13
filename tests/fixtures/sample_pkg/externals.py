@@ -26,3 +26,9 @@ def working_dir() -> str:
 def count(items) -> int:
     """Calls the `len` builtin — a definite external edge to builtins.len."""
     return len(items)
+
+
+def normalize(name: str) -> str:
+    """Stub resolution: `name: str` is external, so `name.upper()` binds to the stdlib
+    stub `builtins.str.upper` at the possible tier (member existence, not dispatch)."""
+    return name.upper()

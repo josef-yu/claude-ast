@@ -18,6 +18,7 @@ from .binding import bind, external_symbol
 from .callsite import observe_arg_types
 from .common import module_qualname
 from .refs import extract_refs
+from .stubs import STDLIB_STUBS, StubProvider
 from .symbols import extract_symbols
 from .typeres import resolve_value_types
 
@@ -27,6 +28,11 @@ class PythonIndexer:
 
     name = "python"
     extensions = frozenset({".py"})
+
+    def __init__(self, stubs: StubProvider = STDLIB_STUBS) -> None:
+        # The stub provider is injected here (not a global) so a future environment-aware
+        # provider — which needs construction-time config — slots in without touching resolve.
+        self._stubs = stubs
 
     def ingest_file(self, path: Path, root: Path) -> FileIndex | None:
         # Read bytes and let ast.parse honor a UTF-8 BOM and any PEP 263 coding
@@ -92,9 +98,15 @@ class PythonIndexer:
                 if is_external:
                     externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
-        # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges.
-        # Runs after syntactic binding, so the cross-file INHERITS edges it walks are present.
-        edges.extend(resolve_value_types(files, edges, reexports))
+        # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges,
+        # plus stub-resolved members on external types (`p: Path; p.exists()`) as MEDIUM STUB
+        # edges to external nodes. Runs after syntactic binding, so cross-file INHERITS present.
+        value_edges, stub_externals = resolve_value_types(
+            files, edges, reexports, internal_roots, self._stubs
+        )
+        edges.extend(value_edges)
+        for ext in stub_externals:
+            externals.setdefault(ext.id, ext)
         # Call-site observations: `g(User())` -> a definite `g RECEIVES_ARG User` edge. A
         # usage fact, independent of the dispatch passes above (no edges needed as input).
         by_id = {sym.id: sym for fi in files for sym in fi.symbols}

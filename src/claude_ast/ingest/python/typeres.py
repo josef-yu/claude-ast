@@ -27,25 +27,34 @@ from collections.abc import Sequence
 
 from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
-from .binding import resolve_type_name
+from .binding import external_symbol, resolve_external_type_name, resolve_type_name
+from .stubs import StubProvider
 
 
 def resolve_value_types(
-    files: Sequence[FileIndex], edges: Sequence[Edge], reexports: dict[str, dict[str, str]]
-) -> list[Edge]:
+    files: Sequence[FileIndex],
+    edges: Sequence[Edge],
+    reexports: dict[str, dict[str, str]],
+    internal_roots: set[str],
+    stubs: StubProvider,
+) -> tuple[list[Edge], list[Symbol]]:
     """Resolve value-typed receiver calls to ``possible`` edges — a confidence ladder:
 
     - ``self.m()`` -> the enclosing class's member (INFERENCE); ``self`` *is* that class.
     - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type.
     - ``x.m()`` after ``x = User()`` -> ``User.m`` (INFERENCE); the constructed type.
+    - ``p.m()`` with ``p: Path`` (an *external* type) -> ``pathlib.Path.m`` if the stub
+      provider knows the member (STUB); the external counterpart of the annotation case.
     - ``obj.m()`` with ``obj`` untyped -> a LOW name match to every ``*.m`` method
       (HEURISTIC), capped so an over-common name yields no edge rather than noise.
 
-    The typed cases share one member lookup (own member, then in-tree bases) and produce
-    exactly one MEDIUM edge; the heuristic is a last resort (a typed receiver whose member
-    isn't found stays silent, never falling through). Runs after syntactic binding so the
-    INHERITS edges the base walk needs are already in ``edges``; ``local_root`` refs only,
-    single attribute (chained ``a.b.c`` deferred).
+    The in-tree typed cases share one member lookup (own member, then in-tree bases) and
+    produce exactly one MEDIUM edge; when in-tree resolution declines because the type is
+    external, the stub provider is consulted for member existence, minting a MEDIUM STUB
+    edge to an EXTERNAL member node (returned alongside the edges). The heuristic is a last
+    resort (a typed receiver whose member isn't found stays silent, never falling through).
+    Runs after syntactic binding so the INHERITS edges the base walk needs are already in
+    ``edges``; ``local_root`` refs only, single attribute (chained ``a.b.c`` deferred).
     """
     by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
     all_ids = set(by_id)
@@ -54,6 +63,7 @@ def resolve_value_types(
     methods_by_name = _methods_by_name(files)
 
     out: list[Edge] = []
+    externals: list[Symbol] = []  # stub member nodes minted for out-of-tree receiver types
     for fi in files:
         module_defs: dict[str, str] = {}
         for s in fi.symbols:
@@ -72,6 +82,17 @@ def resolve_value_types(
                 class_id = resolve_type_name(
                     ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
                 )
+                if class_id is None:
+                    # external receiver type -> consult stubs for member existence off-tree
+                    ext = resolve_external_type_name(
+                        ref.receiver_type, module_defs, fi.imports,
+                        all_ids, internal_roots, reexports,
+                    )
+                    if ext is not None and stubs.member(ext, attr):
+                        member_id = f"{ext}.{attr}"
+                        externals.append(external_symbol(member_id))
+                        out.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
+                    continue
                 resolution = (
                     Resolution.inferred() if ref.receiver_inferred else Resolution.annotated()
                 )
@@ -88,7 +109,7 @@ def resolve_value_types(
             target = _member_lookup(class_id, attr, members, bases)
             if target is not None:
                 out.append(Edge(ref.src, target, ref.kind, resolution, ref.at))
-    return out
+    return out, externals
 
 
 # A name defined as a method on more than this many classes is too ambiguous for the

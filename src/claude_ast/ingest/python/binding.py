@@ -124,6 +124,42 @@ def resolve_type_name(
     return target if sym is not None and sym.kind is SymbolKind.CLASS else None
 
 
+def resolve_external_type_name(
+    name: str,
+    module_defs: dict[str, str],
+    imports: dict[str, str],
+    all_ids: set[SymbolId],
+    internal_roots: set[str],
+    reexports: dict[str, dict[str, str]],
+) -> str | None:
+    """A type name in a file's scope -> its EXTERNAL qualname, or ``None``.
+
+    The external counterpart of ``resolve_type_name``: resolves ``name`` through the file's
+    defs/imports/dotted (plus the builtin fallback, so ``d: dict`` -> ``builtins.dict``),
+    then returns the qualname ONLY when it is genuinely external — ``None`` for an in-tree
+    symbol (the caller already tried in-tree) or a project-rooted-but-unknown name (a value
+    the resolvers own, never a stub target). This is exactly the qualname ``resolve_type_name``
+    computes and discards on its external path; the stub layer consults it.
+    """
+    target = module_defs.get(name) or imports.get(name)
+    if target is None:
+        root, _, rest = name.partition(".")
+        if rest:
+            base = module_defs.get(root) or imports.get(root)
+            if base is not None:
+                target = f"{base}.{rest}"
+    if target is None and name in _BUILTINS:
+        target = f"builtins.{name}"
+    if target is None:
+        return None
+    target = follow_reexports(target, all_ids, reexports)
+    if target in all_ids:
+        return None  # in-tree — resolve_type_name owns it
+    if target.partition(".")[0] in internal_roots:
+        return None  # project-rooted but unknown — defer, never stub a project attr
+    return target
+
+
 def external_symbol(qualname: str) -> Symbol:
     """A leaf node for a library/stdlib target: an edge sink with no in-tree source.
 

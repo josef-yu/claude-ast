@@ -78,8 +78,10 @@ def test_repo_map_surfaces_the_most_referenced_symbol(index: Index) -> None:
 
 def test_external_dependencies_resolve_as_definite_external_edges(index: Index) -> None:
     path_deps = index.find_dependencies("sample_pkg.externals.build_path")
-    assert ("os.path.join", "call", True) in {(d.id, d.kind, d.external) for d in path_deps}
-    assert all(d.tier == "definite" for d in path_deps)
+    join = [d for d in path_deps if d.id == "os.path.join"]
+    # scoped to the join edge specifically: a direct external call is definite (a possible
+    # STUB edge on some other dep must not be able to flip a blanket `all(definite)`).
+    assert join and join[0].kind == "call" and join[0].external and join[0].tier == "definite"
 
     base = index.find_dependencies("sample_pkg.externals.Plugin")
     assert ("abc.ABC", "inherits", True) in {(d.id, d.kind, d.external) for d in base}
@@ -136,6 +138,16 @@ def test_call_site_reports_the_passed_type_as_a_definite_observation(index: Inde
     # the reverse view: "where does Service flow in as an argument type?"
     refs = {(r.id, r.kind) for r in index.find_references("sample_pkg.service.Service")}
     assert ("sample_pkg.service.consume", "receives-arg") in refs
+
+
+def test_stub_resolves_a_member_on_an_external_type(index: Index) -> None:
+    # normalize(name: str) -> `name.upper()` binds to the stdlib stub `builtins.str.upper`,
+    # a possible-tier edge to an EXTERNAL node (member existence, not dispatch).
+    deps = {
+        (d.id, d.kind, d.tier, d.external)
+        for d in index.find_dependencies("sample_pkg.externals.normalize")
+    }
+    assert ("builtins.str.upper", "call", "possible", True) in deps
 
 
 def test_resolution_metrics_summarize_the_index(index: Index) -> None:
@@ -208,3 +220,13 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     consume_gets = {"sample_pkg.service.Service"}
     assert receives(cold_index, "sample_pkg.service.consume") == consume_gets
     assert receives(warm_index, "sample_pkg.service.consume") == consume_gets
+
+    # ...and the stub edge on an external type (`name.upper()` -> builtins.str.upper),
+    # reproduced only if RawRef.receiver_type round-trips through the store.
+    def str_stub(index: Index) -> set[str]:
+        return {
+            d.id for d in index.find_dependencies("sample_pkg.externals.normalize") if d.external
+        }
+
+    assert str_stub(cold_index) == {"builtins.str.upper"}
+    assert str_stub(warm_index) == {"builtins.str.upper"}

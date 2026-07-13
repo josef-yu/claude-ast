@@ -92,6 +92,16 @@ class Resolution:
         return cls(ResolutionSource.ANNOTATION, Confidence.MEDIUM)
 
     @classmethod
+    def stubbed(cls) -> Resolution:
+        """A member resolved on an external type via a stub (``p: Path; p.exists()``).
+
+        MEDIUM/possible on the same footing as an annotation: the stub confirms the member
+        *exists* on the named type, but the annotation may name a supertype a subclass
+        overrides, so dispatch stays open. Absent stub data DECLINES — never a guess, never HIGH.
+        """
+        return cls(ResolutionSource.STUB, Confidence.MEDIUM)
+
+    @classmethod
     def observed(cls) -> Resolution:
         """A type observed flowing into a parameter at a call site (``g(User())`` -> g gets User).
 
