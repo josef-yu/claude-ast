@@ -29,3 +29,8 @@ def bootstrap() -> int:
     """Construction inference: `s = Service()` -> Service.run at the possible tier."""
     s = Service()
     return s.run()
+
+
+def dispatch(obj) -> None:
+    """Untyped receiver: name-matches `persist` (heuristic, LOW) -> Base.persist."""
+    obj.persist()

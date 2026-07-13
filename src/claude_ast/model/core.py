@@ -33,6 +33,13 @@ class Confidence(StrEnum):
         """The two-tier surface Claude sees: ``definite`` vs ``possible``."""
         return "definite" if self is Confidence.HIGH else "possible"
 
+    @property
+    def rank(self) -> int:
+        """A total order (HIGH > MEDIUM > LOW) so a query can ask for edges *at least*
+        this sure — the knob that lets a consumer widen from the reliable default down
+        to the low-confidence guesses only when it needs the recall."""
+        return {Confidence.HIGH: 2, Confidence.MEDIUM: 1, Confidence.LOW: 0}[self]
+
 
 class ResolutionSource(StrEnum):
     """Where an edge's target came from, roughly ordered by trust."""
@@ -83,6 +90,16 @@ class Resolution:
         not be the one actually called.
         """
         return cls(ResolutionSource.ANNOTATION, Confidence.MEDIUM)
+
+    @classmethod
+    def heuristic(cls) -> Resolution:
+        """A name-match guess for an untyped receiver (``obj.save()`` -> every ``*.save``).
+
+        LOW/possible: the receiver's type is unknown, so this is one candidate among
+        several picked purely by name — the weakest tier, a last resort that still
+        reports honestly rather than staying silent.
+        """
+        return cls(ResolutionSource.HEURISTIC, Confidence.LOW)
 
 
 class SymbolKind(StrEnum):

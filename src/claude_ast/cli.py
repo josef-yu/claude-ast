@@ -16,7 +16,18 @@ from collections import Counter
 from pathlib import Path
 
 from .index import Index, store_path
+from .model import Confidence
 from .query import render_repo_map
+
+
+def _add_min_confidence(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--min-confidence",
+        choices=["high", "medium", "low"],
+        default="medium",
+        help="lowest confidence to include — high=definite, medium=+typed, "
+        "low=+name-match heuristics (default: medium)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,10 +48,12 @@ def main(argv: list[str] | None = None) -> int:
     p_callers = sub.add_parser("callers", help="who calls a symbol")
     p_callers.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_callers.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+    _add_min_confidence(p_callers)
 
     p_deps = sub.add_parser("deps", help="what a symbol uses")
     p_deps.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_deps.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+    _add_min_confidence(p_deps)
 
     p_map = sub.add_parser("repo-map", help="ranked skeleton of the codebase")
     p_map.add_argument("path", nargs="?", default=".", help="project root (default: .)")
@@ -59,9 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "outline":
         return _cmd_outline(args.module, Path(args.path))
     if args.command == "callers":
-        return _cmd_relations(args.symbol, Path(args.path), "callers")
+        return _cmd_relations(args.symbol, Path(args.path), "callers", args.min_confidence)
     if args.command == "deps":
-        return _cmd_relations(args.symbol, Path(args.path), "deps")
+        return _cmd_relations(args.symbol, Path(args.path), "deps", args.min_confidence)
     if args.command == "repo-map":
         return _cmd_repo_map(Path(args.path), args.focus, args.budget)
     if args.command == "status":
@@ -138,13 +151,18 @@ def _cmd_outline(module: str, root: Path) -> int:
     return 0
 
 
-def _cmd_relations(symbol: str, root: Path, which: str) -> int:
+def _cmd_relations(symbol: str, root: Path, which: str, min_confidence: str) -> int:
     if not root.exists():
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
     index = Index.build(root)
-    refs = index.find_callers(symbol) if which == "callers" else index.find_dependencies(symbol)
+    conf = Confidence(min_confidence)
+    refs = (
+        index.find_callers(symbol, conf)
+        if which == "callers"
+        else index.find_dependencies(symbol, conf)
+    )
     if not refs:
         verb = "callers of" if which == "callers" else "dependencies for"
         print(f"no {verb} {symbol!r}", file=sys.stderr)

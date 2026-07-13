@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from claude_ast.index import Index
+from claude_ast.model import Confidence
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
@@ -135,8 +136,26 @@ def test_resolution_metrics_summarize_the_index(index: Index) -> None:
     assert m.by_source.get("syntactic", 0) > 0
     assert m.by_source.get("annotation", 0) >= 1  # handle -> Service.run
     assert m.by_source.get("inference", 0) >= 1  # self-calls + bootstrap construction
-    # both tiers are present: definite (high) and possible (medium)
-    assert m.by_confidence.get("high", 0) > 0 and m.by_confidence.get("medium", 0) > 0
+    assert m.by_source.get("heuristic", 0) >= 1  # dispatch -> Base.persist name-match
+    # all three tiers are present: definite (high), and possible (medium + low)
+    assert m.by_confidence.get("high", 0) > 0
+    assert m.by_confidence.get("medium", 0) > 0
+    assert m.by_confidence.get("low", 0) > 0
+
+
+def test_untyped_receiver_name_matches_via_heuristic(index: Index) -> None:
+    # heuristic (LOW) edges are below the default floor -> fetched with min_confidence=LOW
+    assert index.find_dependencies("sample_pkg.service.dispatch") == []
+    deps = index.find_dependencies("sample_pkg.service.dispatch", Confidence.LOW)
+    assert ("sample_pkg.core.Base.persist", "call", "possible") in {
+        (d.id, d.kind, d.tier) for d in deps
+    }
+    edge = next(
+        e
+        for e in index.graph.out_edges("sample_pkg.service.dispatch")
+        if e.dst == "sample_pkg.core.Base.persist"
+    )
+    assert edge.resolution.source.value == "heuristic"
 
 
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:

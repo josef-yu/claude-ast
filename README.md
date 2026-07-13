@@ -60,10 +60,16 @@ claude-ast index <path>              # build/update the index; print a summary
 claude-ast status <path>             # index freshness (cold vs. warm snapshot)
 claude-ast def <name> [path]         # where a name is defined
 claude-ast outline <module> [path]   # a module's symbols
-claude-ast callers <symbol> [path]   # who calls a symbol
-claude-ast deps <symbol> [path]      # what a symbol uses
+claude-ast callers <symbol> [path] [--min-confidence high|medium|low]   # who calls a symbol
+claude-ast deps <symbol> [path] [--min-confidence high|medium|low]      # what a symbol uses
 claude-ast repo-map [path] [--focus <id>] [--budget N]
 ```
+
+`callers` / `deps` take `--min-confidence` (default `medium`): the consumer's dial from
+the reliable set (definite + typed guesses) down to the `low` name-match heuristics —
+fetched only when the recall is worth the noise. The engine always *reports* every edge
+at honest confidence; the caller decides how much to pull. This is the knob the P3 MCP
+tools will expose so the model can widen its own view on demand.
 
 The index persists at `<root>/.claude-ast/index.db` (self-ignoring;
 `CLAUDE_AST_CACHE_DIR` relocates it centrally).
@@ -83,5 +89,5 @@ architecture.
 ## Roadmap
 
 - **Landed since P1:** the **external-reference boundary** — library/stdlib targets surface as `external` nodes on `find_dependencies`, as `definite` edges kept out of ranking (deterministic — import text only). Covers from-import calls, external base classes, and **module-rooted attribute calls** (`os.path.join()`, dotted bases like `abc.ABC`); the external-id scheme is backend-owned, so a JS/TS backend can encode richer coordinates. The lean id-scheme fixes (`#N` disambiguation, single id-assignment authority, no neutral id-parsing) are in; the structured module/member id redesign stays deferred past P2.
-- **P2 (in progress):** the value-typed resolver stack — the `possible`-tier edges that make "report, don't rule" earn its keep. **Landed:** `self.m()` → the enclosing class's member (+ cross-file inherited); annotation-typed receivers (`u: User` → `User.save`); local **construction inference** (`x = User(); x.save()`); **relative-import resolution** (`from ..model import X`); and **package re-export resolution** (`from pkg import X` follows `pkg/__init__` to the real defining module). All value-typed edges are `MEDIUM`/possible. a **builtins** pass (`len` / `Exception` / `str.join` → `definite` external edges); and **resolution metrics** — `claude-ast index` reports coverage + the definite/possible and per-source split (its own `src/`: **68% of refs bound**, 347 definite / 23 possible), the measurement loop that drove the builtins win (44% → 68%). **Next:** the **call-site resolver + confidence merge** (a corroborating call-site observation escalates an edge to `definite`); name-match **heuristics** for the remaining dynamic tail; and `.pyi`/typeshed **stubs** (opt-in).
+- **P2 (in progress):** the value-typed resolver stack — the `possible`-tier edges that make "report, don't rule" earn its keep. **Landed:** `self.m()` → the enclosing class's member (+ cross-file inherited); annotation-typed receivers (`u: User` → `User.save`); local **construction inference** (`x = User(); x.save()`); **relative-import resolution** (`from ..model import X`); and **package re-export resolution** (`from pkg import X` follows `pkg/__init__` to the real defining module). All value-typed edges are `MEDIUM`/possible. a **builtins** pass (`len` / `Exception` → `definite` external edges); and a capped name-match **heuristic** (`LOW`) for untyped receivers — completing the confidence ladder (definite → medium → low). All measured by **resolution metrics**: `claude-ast index` reports coverage + the tier/source split (its own `src/`: **69% of refs bound**, 350 definite / 33 possible), the loop that drove the builtins win (44% → 68%). **Next:** the **call-site resolver + confidence merge** (a corroborating call-site observation escalates an edge to `definite`); and `.pyi`/typeshed **stubs** (opt-in).
 - **P3:** the MCP server (stdio, per-project) + the live filesystem watcher. Needs a **stderr logging seam** (stdout is the protocol channel), introduced earlier so skipped files stop being silently invisible.

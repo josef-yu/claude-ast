@@ -38,15 +38,25 @@ def test_find_callers_returns_inbound_calls_as_definite():
 
 
 def test_find_dependencies_returns_all_outbound_kinds_with_tiers():
-    got = {(r.id, r.kind, r.tier) for r in find_dependencies(_graph(), "m.a")}
+    got = {(r.id, r.kind, r.tier) for r in find_dependencies(_graph(), "m.a", Confidence.LOW)}
     assert got == {("m.b", "call", "definite"), ("m.C", "inherits", "possible")}
 
 
 def test_find_references_includes_non_call_edges():
-    got = {(r.id, r.kind, r.tier) for r in find_references(_graph(), "m.C")}
+    got = {(r.id, r.kind, r.tier) for r in find_references(_graph(), "m.C", Confidence.LOW)}
     assert got == {("m.a", "inherits", "possible")}
 
 
 def test_low_confidence_surfaces_as_possible():
-    (ref,) = find_dependencies(_graph(), "m.a")[1:]  # the inherits edge
+    (ref,) = find_dependencies(_graph(), "m.a", Confidence.LOW)[1:]  # the inherits edge
     assert ref.tier == "possible"
+
+
+def test_min_confidence_gates_low_edges_by_default():
+    g = _graph()
+    # the default floor (MEDIUM) omits the LOW inherits edge — only the definite call shows
+    assert {r.id for r in find_dependencies(g, "m.a")} == {"m.b"}
+    # the consumer widens to fetch the low-confidence guess...
+    assert {r.id for r in find_dependencies(g, "m.a", Confidence.LOW)} == {"m.b", "m.C"}
+    # ...or tightens to definite-only
+    assert {r.id for r in find_dependencies(g, "m.a", Confidence.HIGH)} == {"m.b"}

@@ -33,21 +33,25 @@ from .binding import follow_reexports
 def resolve_value_types(
     files: Sequence[FileIndex], edges: Sequence[Edge], reexports: dict[str, dict[str, str]]
 ) -> list[Edge]:
-    """Resolve value-typed receiver calls to MEDIUM (``possible``) edges — the ways a
-    receiver's type is statically known:
+    """Resolve value-typed receiver calls to ``possible`` edges — a confidence ladder:
 
     - ``self.m()`` -> the enclosing class's member (INFERENCE); ``self`` *is* that class.
     - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type.
     - ``x.m()`` after ``x = User()`` -> ``User.m`` (INFERENCE); the constructed type.
+    - ``obj.m()`` with ``obj`` untyped -> a LOW name match to every ``*.m`` method
+      (HEURISTIC), capped so an over-common name yields no edge rather than noise.
 
-    All share one member lookup (own member, then in-tree bases). Runs after syntactic
-    binding so the INHERITS edges the base walk needs are already in ``edges``. Only
-    ``local_root`` refs are considered, single attribute only (chained ``a.b.c`` deferred).
+    The typed cases share one member lookup (own member, then in-tree bases) and produce
+    exactly one MEDIUM edge; the heuristic is a last resort (a typed receiver whose member
+    isn't found stays silent, never falling through). Runs after syntactic binding so the
+    INHERITS edges the base walk needs are already in ``edges``; ``local_root`` refs only,
+    single attribute (chained ``a.b.c`` deferred).
     """
     by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
     all_ids = set(by_id)
     members = _members(files)
     bases = _bases(edges, by_id)
+    methods_by_name = _methods_by_name(files)
 
     out: list[Edge] = []
     for fi in files:
@@ -72,13 +76,34 @@ def resolve_value_types(
                     Resolution.inferred() if ref.receiver_inferred else Resolution.annotated()
                 )
             else:
-                continue  # a value receiver we can't type yet (unannotated non-self)
+                # untyped receiver: last-resort name match, one LOW edge per candidate,
+                # but only when the name is specific enough (<= cap) to report, not spam.
+                candidates = methods_by_name.get(attr, ())
+                if 0 < len(candidates) <= _HEURISTIC_CAP:
+                    for target in candidates:
+                        out.append(Edge(ref.src, target, ref.kind, Resolution.heuristic(), ref.at))
+                continue
             if class_id is None:
                 continue
             target = _member_lookup(class_id, attr, members, bases)
             if target is not None:
                 out.append(Edge(ref.src, target, ref.kind, resolution, ref.at))
     return out
+
+
+# A name defined as a method on more than this many classes is too ambiguous for the
+# heuristic to be a useful report, so it emits nothing rather than a wall of candidates.
+_HEURISTIC_CAP = 8
+
+
+def _methods_by_name(files: Sequence[FileIndex]) -> dict[str, list[SymbolId]]:
+    """method name -> the ids of every method with that name, in deterministic order."""
+    by_name: dict[str, list[SymbolId]] = {}
+    for fi in files:
+        for sym in fi.symbols:
+            if sym.kind is SymbolKind.METHOD:
+                by_name.setdefault(sym.name, []).append(sym.id)
+    return by_name
 
 
 def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None:

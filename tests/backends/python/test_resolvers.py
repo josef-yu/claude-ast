@@ -7,6 +7,7 @@ edge guarantees. Syntactic binding is test_edges.py.
 """
 
 from claude_ast.index import Index
+from claude_ast.model import Confidence
 
 
 def test_self_call_resolves_to_the_enclosing_class_member_as_possible(tmp_path):
@@ -124,14 +125,16 @@ def test_external_or_unknown_annotation_yields_no_edge(tmp_path):
     assert index.find_dependencies("m.b") == []
 
 
-def test_subscripted_annotation_is_deferred(tmp_path):
-    # `list[User]` is a subscript -> no receiver_type -> deferred, never a false edge.
+def test_subscripted_annotation_is_not_read_as_the_element_type(tmp_path):
+    # `us: list[User]` must not be read as `us: User`: no MEDIUM annotation edge (a LOW
+    # heuristic name-match may still fire — the receiver is untyped as far as we know).
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "def store(us: list[User]):\n    return us.save()\n"
     )
     index = Index.build(tmp_path)
-    assert index.find_dependencies("m.store") == []
+    sources = {e.resolution.source.value for e in index.graph.out_edges("m.store")}
+    assert "annotation" not in sources
 
 
 def test_double_dot_relative_import_feeds_annotation_resolution(tmp_path):
@@ -181,7 +184,7 @@ def test_constructed_local_receiver_resolves_via_inference(tmp_path):
     assert edge.resolution.source.value == "inference"
 
 
-def test_reassigned_local_is_ambiguous_and_yields_no_inference_edge(tmp_path):
+def test_reassigned_local_is_not_inferred_but_falls_to_the_heuristic(tmp_path):
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "class Post:\n    def save(self):\n        ...\n\n\n"
@@ -189,8 +192,13 @@ def test_reassigned_local_is_ambiguous_and_yields_no_inference_edge(tmp_path):
     )
     index = Index.build(tmp_path)
 
-    # x is assigned two distinct constructors -> ambiguous -> dropped, no guessed edge
-    assert not any(d.id.endswith(".save") for d in index.find_dependencies("m.run"))
+    # ambiguous construction -> no INFERENCE edge; the untyped receiver name-matches (LOW)
+    save = {
+        (e.dst, e.resolution.source.value)
+        for e in index.graph.out_edges("m.run")
+        if e.dst.endswith(".save")
+    }
+    assert save == {("m.User.save", "heuristic"), ("m.Post.save", "heuristic")}
 
 
 def test_inference_does_not_bind_a_function_return_value(tmp_path):
@@ -206,7 +214,8 @@ def test_inference_does_not_bind_a_function_return_value(tmp_path):
 
 
 def test_nested_shadow_does_not_inherit_the_outer_annotation(tmp_path):
-    # inner's `u` is a distinct, untyped parameter; it must NOT inherit outer's `u: User`.
+    # inner's `u` is a distinct, untyped param: no ANNOTATION edge inherited from outer's
+    # `u: User` (a LOW heuristic name-match is fine — the point is honest provenance).
     (tmp_path / "m.py").write_text(
         "class User:\n    def m(self):\n        ...\n\n\n"
         "def outer(u: User):\n"
@@ -214,7 +223,8 @@ def test_nested_shadow_does_not_inherit_the_outer_annotation(tmp_path):
         "    return inner\n"
     )
     index = Index.build(tmp_path)
-    assert "m.User.m" not in {d.id for d in index.find_dependencies("m.outer.inner")}
+    sources = {e.resolution.source.value for e in index.graph.out_edges("m.outer.inner")}
+    assert "annotation" not in sources
 
 
 def test_typed_receiver_resolves_through_an_in_tree_base(tmp_path):
@@ -228,15 +238,17 @@ def test_typed_receiver_resolves_through_an_in_tree_base(tmp_path):
     assert ("m.Base.hook", "possible") in {(d.id, d.tier) for d in index.find_dependencies("m.use")}
 
 
-def test_local_annotated_assignment_is_deferred(tmp_path):
-    # `x: User = make()` — a local annotated assignment — is not captured yet -> no edge.
+def test_local_annotated_assignment_is_not_captured_as_annotation(tmp_path):
+    # `x: User = make()` — a local annotated assignment — is not captured as a receiver
+    # annotation (deferred): no ANNOTATION edge (a LOW heuristic match may appear).
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "def make():\n    return object()\n\n\n"
         "def run():\n    x: User = make()\n    return x.save()\n"
     )
     index = Index.build(tmp_path)
-    assert "m.User.save" not in {d.id for d in index.find_dependencies("m.run")}
+    sources = {e.resolution.source.value for e in index.graph.out_edges("m.run")}
+    assert "annotation" not in sources
 
 
 def test_chained_receiver_is_deferred(tmp_path):
@@ -257,3 +269,41 @@ def test_mixed_definite_and_possible_callers(tmp_path):
     tiers = {r.id: r.tier for r in index.find_callers("m.C.target")}
     assert tiers.get("m.direct") == "definite"
     assert tiers.get("m.via") == "possible"
+
+
+def test_untyped_receiver_name_matches_via_heuristic(tmp_path):
+    # `obj.save()` on an untyped param -> a LOW edge to every `*.save` candidate.
+    (tmp_path / "m.py").write_text(
+        "class A:\n    def save(self):\n        ...\n\n\n"
+        "class B:\n    def save(self):\n        ...\n\n\n"
+        "def dispatch(obj):\n    return obj.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    # heuristic edges are LOW — excluded by the default floor, fetched with min_confidence=LOW
+    assert index.find_dependencies("m.dispatch") == []
+    deps = {(d.id, d.tier) for d in index.find_dependencies("m.dispatch", Confidence.LOW)}
+    assert ("m.A.save", "possible") in deps and ("m.B.save", "possible") in deps
+    edge = next(e for e in index.graph.out_edges("m.dispatch") if e.dst == "m.A.save")
+    assert edge.resolution.source.value == "heuristic"
+
+
+def test_heuristic_declines_when_a_name_is_too_common(tmp_path):
+    classes = "".join(f"class C{i}:\n    def ping(self):\n        ...\n\n\n" for i in range(12))
+    (tmp_path / "m.py").write_text(classes + "def dispatch(obj):\n    return obj.ping()\n")
+    index = Index.build(tmp_path)
+
+    # `ping` is defined on 12 classes (over the cap) -> too ambiguous -> no heuristic edges
+    assert index.find_dependencies("m.dispatch") == []
+
+
+def test_typed_receiver_missing_member_does_not_fall_to_heuristic(tmp_path):
+    (tmp_path / "m.py").write_text(
+        "class A:\n    def save(self):\n        ...\n\n\n"  # a name-match candidate
+        "class User:\n    ...\n\n\n"  # the receiver's type — has no `save`
+        "def f(u: User):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    # u is typed User (no save); the typed path finds nothing and must NOT name-match A.save
+    assert index.find_dependencies("m.f") == []

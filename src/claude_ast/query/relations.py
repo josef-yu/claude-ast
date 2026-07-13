@@ -1,16 +1,21 @@
 """Relationship queries — pure functions over a Graph's edges.
 
 find_callers / find_references (inbound) and find_dependencies (outbound). Each
-result carries its confidence **tier** (``definite`` / ``possible``) — the whole
-point of the model. In P1 every edge is syntactic, so everything is ``definite``;
-the P2 resolver stack introduces ``possible`` edges.
+result carries its confidence **tier** (``definite`` / ``possible``), and each query
+takes ``min_confidence``: the consumer's dial from the reliable default (``MEDIUM`` —
+definite plus typed guesses) down to the ``LOW`` name-match heuristics, fetched only
+when it needs the recall. "Report, don't rule" with the caller in control of how much.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..model import Edge, EdgeKind, Graph, Span, SymbolId
+from ..model import Confidence, Edge, EdgeKind, Graph, Span, SymbolId
+
+# The default floor: definite + typed-possible (annotation/inference), but not the
+# LOW name-match guesses — those are one explicit `min_confidence=Confidence.LOW` away.
+DEFAULT_MIN_CONFIDENCE = Confidence.MEDIUM
 
 
 @dataclass(slots=True)
@@ -24,12 +29,20 @@ class Reference:
     external: bool = False  # the other symbol is a library/stdlib node, not in-tree
 
 
-def find_callers(graph: Graph, symbol: SymbolId) -> list[Reference]:
-    """Symbols that call ``symbol`` (inbound CALL edges)."""
-    return [_ref(e.src, e) for e in graph.in_edges(symbol, EdgeKind.CALL)]
+def find_callers(
+    graph: Graph, symbol: SymbolId, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+) -> list[Reference]:
+    """Symbols that call ``symbol`` (inbound CALL edges) at least ``min_confidence`` sure."""
+    return [
+        _ref(e.src, e)
+        for e in graph.in_edges(symbol, EdgeKind.CALL)
+        if e.resolution.confidence.rank >= min_confidence.rank
+    ]
 
 
-def find_references(graph: Graph, symbol: SymbolId) -> list[Reference]:
+def find_references(
+    graph: Graph, symbol: SymbolId, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+) -> list[Reference]:
     """Every symbol that *references* ``symbol`` — a use (call, attribute read,
     inheritance, import), not mere structural containment.
 
@@ -38,12 +51,23 @@ def find_references(graph: Graph, symbol: SymbolId) -> list[Reference]:
     exclusion keeps the invariant honest once the P2 resolver stack starts
     emitting more edge kinds — 'references' won't silently absorb containment.
     """
-    return [_ref(e.src, e) for e in graph.in_edges(symbol) if e.kind is not EdgeKind.CONTAINS]
+    return [
+        _ref(e.src, e)
+        for e in graph.in_edges(symbol)
+        if e.kind is not EdgeKind.CONTAINS and e.resolution.confidence.rank >= min_confidence.rank
+    ]
 
 
-def find_dependencies(graph: Graph, symbol: SymbolId) -> list[Reference]:
-    """Everything ``symbol`` uses (all outbound edges), library/stdlib targets flagged."""
-    return [_ref(e.dst, e, graph.is_external(e.dst)) for e in graph.out_edges(symbol)]
+def find_dependencies(
+    graph: Graph, symbol: SymbolId, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+) -> list[Reference]:
+    """Everything ``symbol`` uses (outbound edges) at least ``min_confidence`` sure,
+    library/stdlib targets flagged."""
+    return [
+        _ref(e.dst, e, graph.is_external(e.dst))
+        for e in graph.out_edges(symbol)
+        if e.resolution.confidence.rank >= min_confidence.rank
+    ]
 
 
 def _ref(other: SymbolId, edge: Edge, external: bool = False) -> Reference:

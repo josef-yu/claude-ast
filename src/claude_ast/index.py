@@ -14,8 +14,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from .ingest import Indexer, default_indexers, ingest_project
-from .model import Graph
+from .model import Confidence, Graph
 from .query import (
+    DEFAULT_MIN_CONFIDENCE,
     Definition,
     OutlineEntry,
     Reference,
@@ -104,14 +105,20 @@ class Index:
     def outline(self, module: str) -> list[OutlineEntry]:
         return outline(self.graph, module)
 
-    def find_callers(self, symbol: str) -> list[Reference]:
-        return find_callers(self.graph, symbol)
+    def find_callers(
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+    ) -> list[Reference]:
+        return find_callers(self.graph, symbol, min_confidence)
 
-    def find_references(self, symbol: str) -> list[Reference]:
-        return find_references(self.graph, symbol)
+    def find_references(
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+    ) -> list[Reference]:
+        return find_references(self.graph, symbol, min_confidence)
 
-    def find_dependencies(self, symbol: str) -> list[Reference]:
-        return find_dependencies(self.graph, symbol)
+    def find_dependencies(
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+    ) -> list[Reference]:
+        return find_dependencies(self.graph, symbol, min_confidence)
 
     def repo_map(self, budget: int = 2000, focus: str | None = None) -> list[RepoMapEntry]:
         return repo_map(self.graph, budget, focus)
