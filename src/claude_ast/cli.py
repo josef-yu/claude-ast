@@ -89,6 +89,18 @@ def _cmd_index(root: Path) -> int:
     external = sum(1 for _ in index.graph.externals())
     if external:
         print(f"  {external:>6}  external targets (library/stdlib)")
+
+    m = index.metrics
+    if m.total_refs:
+        definite = m.by_confidence.get("high", 0)
+        possible = sum(n for c, n in m.by_confidence.items() if c != "high")
+        print(
+            f"resolution: {m.coverage:.0%} of {m.total_refs} refs bound"
+            f" · {definite} definite / {possible} possible"
+        )
+        by_source = sorted(m.by_source.items(), key=lambda kv: (-kv[1], kv[0]))
+        print("  by source: " + ", ".join(f"{src} {n}" for src, n in by_source))
+
     if index.skipped:
         print(f"  skipped {len(index.skipped)} file(s) — unreadable or syntax error")
     return 0

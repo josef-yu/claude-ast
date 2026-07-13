@@ -7,6 +7,7 @@ orientation is not a separate subsystem, it's the graph, ranked.  [P1/P2]
 """
 
 from .lookup import Definition, OutlineEntry, find_definition, outline
+from .metrics import ResolutionMetrics, resolution_metrics
 from .rank import pagerank
 from .relations import Reference, find_callers, find_dependencies, find_references
 from .repomap import RepoMapEntry, render_repo_map, repo_map
@@ -16,6 +17,7 @@ __all__ = [
     "OutlineEntry",
     "Reference",
     "RepoMapEntry",
+    "ResolutionMetrics",
     "find_callers",
     "find_definition",
     "find_dependencies",
@@ -24,4 +26,5 @@ __all__ = [
     "pagerank",
     "render_repo_map",
     "repo_map",
+    "resolution_metrics",
 ]

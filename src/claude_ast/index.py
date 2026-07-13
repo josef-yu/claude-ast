@@ -20,12 +20,14 @@ from .query import (
     OutlineEntry,
     Reference,
     RepoMapEntry,
+    ResolutionMetrics,
     find_callers,
     find_definition,
     find_dependencies,
     find_references,
     outline,
     repo_map,
+    resolution_metrics,
 )
 from .store import SqliteStore
 
@@ -40,10 +42,17 @@ def store_path(root: Path) -> Path:
 
 
 class Index:
-    def __init__(self, graph: Graph, root: Path, skipped: Sequence[str] = ()) -> None:
+    def __init__(
+        self,
+        graph: Graph,
+        root: Path,
+        skipped: Sequence[str] = (),
+        metrics: ResolutionMetrics | None = None,
+    ) -> None:
         self.graph = graph
         self.root = root
         self.skipped = list(skipped)  # paths that couldn't be read/parsed this build
+        self.metrics = metrics or ResolutionMetrics(0, 0, {}, {})
 
     @classmethod
     def build(
@@ -85,7 +94,9 @@ class Index:
                 graph.add_external(external)
             for edge in resolved.edges:
                 graph.add_edge(edge)
-        return cls(graph, root, skipped=result.skipped)
+        total_refs = sum(len(fi.refs) for fi in result.files)
+        metrics = resolution_metrics(total_refs, graph)
+        return cls(graph, root, skipped=result.skipped, metrics=metrics)
 
     def find_definition(self, name: str) -> list[Definition]:
         return find_definition(self.graph, name)

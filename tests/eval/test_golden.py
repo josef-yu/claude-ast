@@ -120,6 +120,18 @@ def test_constructed_receiver_resolves_via_inference(index: Index) -> None:
     assert ("sample_pkg.service.Service.run", "call", "possible") in deps
 
 
+def test_resolution_metrics_summarize_the_index(index: Index) -> None:
+    m = index.metrics
+    assert m.total_refs > 0 and 0 < m.bound_refs <= m.total_refs
+    assert 0.0 < m.coverage <= 1.0
+    # the fixture exercises syntactic binding + every value-typed source
+    assert m.by_source.get("syntactic", 0) > 0
+    assert m.by_source.get("annotation", 0) >= 1  # handle -> Service.run
+    assert m.by_source.get("inference", 0) >= 1  # self-calls + bootstrap construction
+    # both tiers are present: definite (high) and possible (medium)
+    assert m.by_confidence.get("high", 0) > 0 and m.by_confidence.get("medium", 0) > 0
+
+
 def test_external_targets_stay_out_of_ranking(index: Index) -> None:
     # Library nodes are edge sinks, never part of the ranked skeleton.
     ids = {e.id for e in index.repo_map(budget=1000)}
