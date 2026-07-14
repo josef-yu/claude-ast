@@ -121,7 +121,7 @@ def resolve_value_types(
                         ref.receiver_type, module_defs, fi.imports,
                         all_ids, internal_roots, reexports,
                     )
-                    if ext is not None and stubs.member(ext, attr):
+                    if ext is not None and stubs.type_member(ext, attr) is not None:
                         member_id = f"{ext}.{attr}"
                         externals.append(external_symbol(member_id))
                         out.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
