@@ -532,3 +532,68 @@ submodule-import refs; harness: env-gated stdlib attrs → SKIPPED, identity-mat
   excludes every one of them.
 - **Import +91 edges** — repeated/conditional `from pkg import sub` sites now each carry a span (100%
   static-confirmed), and `importers --source` can print them.
+
+---
+
+# Eval results — v6 (multi-app runtime calibration: 4× the coverage, same honesty)
+
+**Verdict: the tiers hold at 4× runtime coverage, and the reconciliation stays clean — zero candidate
+false-definites over 17,331 observed call sites.** The two harness features this run added — **trace
+accumulation across processes** (`--trace-out` / `--trace-in`) and the **`--init` setup hook** — retire the
+"one small test app" caveat that every Django section so far carried: the per-source rows are now measured,
+not directional.
+
+## Setup
+
+Five Django test apps (`dispatch`, `httpwrappers`, `urlpatterns`, `utils_tests`, `model_fields`), each traced
+in its **own process** with `--trace-out`, then one `--no-runtime` pass scored against the union of the five
+traces with `--init` running `settings.configure(INSTALLED_APPS=[…contrib…]) ; django.setup()` so the `mro`
+check can import model classes. Union = **17,331 sites** (vs 5,721 from `dispatch` alone); definite traced
+edges 1,606 → **6,011**.
+
+## Calibration curve (dispatch precision by confidence level)
+
+| confidence | tier | edges | traceable (was) | strict (was) | family |
+|---|---|--:|--:|--:|--:|
+| **high** | definite | 62,535 | 6,011 (1,606) | **93%** (97%) | 93% |
+| **medium** | possible | 22,282 | 1,674 (207) | **81%** (81%) | 84% |
+| **low** | possible | 24,116 | 3,405 (1,266) | **16%** (17%) | 26% |
+
+`high`'s 93% is a **floor that moved for tracer reasons, not resolver reasons**: the wider slice (especially
+`model_fields`) reaches far more C-level callees — 812 untraceable sites excluded, and **316**
+runtime-contradicted edges *all* independently confirmed by the static audit (C functions reported under
+implementation names). After reconciliation: **zero candidate false-definites.**
+
+## By resolution source (the possible tier, at 8× the sample)
+
+| source | tier | edges | traceable (was) | strict (was) | family |
+|---|---|--:|--:|--:|--:|
+| inference | possible | 21,108 | 1,491 (183) | **84%** (85%) | 87% |
+| stub | possible | 1,174 | 183 (24) | **60%** (50%) | 60% |
+| heuristic | possible | 24,116 | 3,405 (1,266) | 16% (17%) | 26% |
+
+Every row held (or rose) as its denominator grew 7–8× — the single-app numbers were honest samples, not flukes.
+`stub`'s rise to 60% on a real sample confirms the old 50%-on-24 was a coverage floor; the remaining gap is
+still C-method attribution, not contradiction (contra 1%).
+
+## The mro unlock (and what honestly stays locked)
+
+With `--init`, the inheritance check over the **production package** decides: `django.*` **1,410 confirmed /
+418 skipped** (the 418 are contrib apps needing binary deps — GDAL, psycopg). Of the 6,008 remaining skips,
+**93% are `tests.*` model classes** (5,567) — Django's per-app test models, importable only when the test
+runner installs their app. That is subject scoping (the repo-root subject indexes `tests/` and `docs/`), not
+an oracle weakness; every decided mro edge is 100% confirmed, 0 refuted.
+
+## A reproducibility trap worth recording
+
+The first `--init` attempt put `$DJANGO/tests` on `sys.path` (to import the `test_sqlite` settings module) —
+and Django's `tests/sphinx/` package **shadowed real sphinx**, turning three `docs._ext` edges into false
+static refutations. The fix (`settings.configure()`, no path edit) removed them. Lesson: an `--init` snippet
+must not widen `sys.path` beyond the subject root the index was built on.
+
+## Synthesis
+
+v4/v5's Django claims all carried "runtime = one small app; the curve is a slice." v6 closes that: at 4× the
+sites and 8× the possible-tier sample, **the curve is unchanged in shape, every per-source row is stable or
+better, and both oracles together still find zero false-definites.** The calibration story is no longer
+directional anywhere that matters — the numbers are now fit to gate CI on.

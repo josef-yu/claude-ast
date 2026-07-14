@@ -88,6 +88,26 @@ be traced), chosen by flags rather than a dedicated per-project module:
 | `python ROOT --driver module --target pkg.cli --argv "…"` | run `python -m pkg.cli` in-process |
 | `python ROOT --no-runtime` | skip tracing — static audit only |
 
+Two flags widen what one process can reach:
+
+- **`--init "CODE"`** — a Python snippet exec'd (project on `sys.path`) before any oracle imports
+  subject code. E.g. `--init "import django; django.setup()"` populates the app registry so the
+  static audit can import Django's model classes and *decide* their `mro` checks instead of
+  skipping them.
+- **`--trace-in T.json … --trace-out T.json`** — accumulate runtime coverage across **separate
+  processes**. One traced run can only exercise so much (`setprofile` is slow; a crash forfeits
+  the trace), so run one driver per process with `--trace-out`, then score once against the union
+  via repeated `--trace-in` (with `--no-runtime` for a pure scoring pass). A trace is keyed by
+  `(file, line)` sites — valid only for the exact checkout it was recorded on.
+
+```sh
+# per-app traced runs (separate processes), then one union-scored pass with mro unlocked:
+run python ROOT --driver script --target tests/runtests.py --argv "… dispatch"    --trace-out t-dispatch.json
+run python ROOT --driver script --target tests/runtests.py --argv "… httpwrappers" --trace-out t-http.json
+run python ROOT --no-runtime --trace-in t-dispatch.json --trace-in t-http.json \
+    --init "import django; django.setup()"
+```
+
 So a project's own test runner *is* a driver, with no special-casing — e.g. Django:
 
 ```sh

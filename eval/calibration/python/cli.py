@@ -22,6 +22,7 @@ from claude_ast.index import Index
 
 from ..edges import enumerate_edges, module_ids
 from ..report import format_report
+from ..trace import load_trace, merge_trace, save_trace
 from ..verdicts import ObservedMap, RuntimeOracle, StaticOracle
 from .driver import (
     build_driver,
@@ -74,6 +75,28 @@ def add_subcommand(
         help="argv for the pytest/script/module driver, as one shell-quoted string, e.g. "
         "--argv '--settings=test_sqlite --parallel=1 auth'.",
     )
+    p.add_argument(
+        "--init",
+        metavar="CODE",
+        help="a Python snippet exec'd (with the project on sys.path) before any oracle imports "
+        "subject code — e.g. \"import django; django.setup()\" so the static audit can import "
+        "setup-gated classes (Django models) instead of skipping their checks.",
+    )
+    p.add_argument(
+        "--trace-in",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="a trace file from a prior --trace-out run to fold into this scoring (repeatable). "
+        "Runs accumulate: several drivers in separate processes, judged against the union. "
+        "Valid only for the exact checkout the traces were recorded on.",
+    )
+    p.add_argument(
+        "--trace-out",
+        metavar="PATH",
+        help="write the observed dispatch map (this run's trace unioned with every --trace-in) "
+        "for a later run to consume.",
+    )
     p.set_defaults(func=lambda args: run(args, src, tests, fixtures))
 
 
@@ -86,6 +109,11 @@ def run(args: argparse.Namespace, src: Path, tests: Path, fixtures: Path) -> int
     else:
         subject = src  # already on sys.path
         is_self = True
+
+    if args.init:
+        # Project setup the oracles need before importing subject code (e.g. django.setup()
+        # populating the app registry so model classes import for the mro check).
+        exec(args.init, {})  # noqa: S102 — caller-supplied by design, like --driver
 
     index = Index.build(subject, use_store=False)
     graph = index.graph
@@ -100,9 +128,16 @@ def run(args: argparse.Namespace, src: Path, tests: Path, fixtures: Path) -> int
           f"coverage(metrics)={index.metrics.coverage:.1%}", file=sys.stderr)
     print(f"[calibration] driver: {driver_desc}", file=sys.stderr)
     observed: ObservedMap = {}
+    for prior in args.trace_in:
+        loaded = load_trace(Path(prior))
+        merge_trace(observed, loaded)
+        print(f"[calibration] trace-in {prior}: {len(loaded)} sites", file=sys.stderr)
     if driver is not None:
-        observed = runtime.trace(driver, str(subject))
-        print(f"[calibration] observed {len(observed)} in-subject call sites", file=sys.stderr)
+        merge_trace(observed, runtime.trace(driver, str(subject)))
+    print(f"[calibration] scoring against {len(observed)} observed call sites", file=sys.stderr)
+    if args.trace_out:
+        save_trace(observed, Path(args.trace_out))
+        print(f"[calibration] trace-out {args.trace_out}", file=sys.stderr)
 
     call_edges = [e for e in edges if e.kind == "call"]
     call_verdicts = [runtime.judge(e, observed) for e in call_edges]
