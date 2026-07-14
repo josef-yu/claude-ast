@@ -200,11 +200,20 @@ def _visit(
             # receiver call (`re.compile`) + the ordered members reached on its return
             # (`("match", "group")`) for the chain resolver.
             chain = _call_chain(node)
-            if chain is not None and not _local(chain[0].partition(".")[0], locals_):
+            if chain is not None:
                 receiver, members = chain
-                refs.append(
-                    RawRef(enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members)
-                )
+                if not _local(receiver.partition(".")[0], locals_):
+                    refs.append(RawRef(
+                        enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members
+                    ))
+                elif "." in receiver:
+                    # value-rooted chain (`self.get().run()`): the receiver is a value-typed call,
+                    # so the type resolvers own it — flagged, with the receiver's type when known.
+                    rtype, rinferred = types.get(receiver.partition(".")[0], (None, False))
+                    refs.append(RawRef(
+                        enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members,
+                        local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
+                    ))
 
     for child in ast.iter_child_nodes(node):
         _visit(child, enclosing, path, refs, locals_, types, node_ids)

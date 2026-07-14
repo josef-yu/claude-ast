@@ -22,8 +22,8 @@ def test_canonical_entries_resolve_finding_2() -> None:
 
 
 def test_return_types_enable_chaining() -> None:
-    # Path.cwd() -> Path (Self resolved), Path.exists() -> bool: `Path.cwd().exists()` chains.
-    assert t.CLASSES["pathlib.Path"]["cwd"] == ("method", "pathlib.Path")
+    # Path.cwd() -> Self (covariant, resolved to the receiver at chain time), .exists() -> bool.
+    assert t.CLASSES["pathlib.Path"]["cwd"] == ("method", "Self")
     assert t.CLASSES["pathlib.Path"]["exists"] == ("method", "builtins.bool")
     # inherited members are MRO-flattened onto the subclass.
     assert "joinpath" in t.CLASSES["pathlib.Path"]  # defined on PurePath

@@ -76,7 +76,7 @@ def _visit(
             out.append(
                 Symbol(fid, child.name, kind, span(path, child),
                        signature=_func_sig(child), doc=_docline(child), parent=prefix,
-                       return_type=_annotation_name(child.returns))
+                       return_type=_return_type_of(child))
             )
             _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, ast.Assign | ast.AnnAssign):
@@ -120,6 +120,36 @@ def _docline(
         if stripped:
             return stripped
     return None
+
+
+def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """A function's return type as a resolvable name: the annotation if present, else inferred
+    from the body — a single unambiguous ``return Ctor(...)`` names its class. Un-annotated
+    functions are common, and this feeds the same chaining/assignment resolution as annotations."""
+    if fn.returns is not None:
+        return _annotation_name(fn.returns)
+    ctors: set[str] = set()
+    ambiguous = False
+
+    def scan(node: ast.AST) -> None:
+        nonlocal ambiguous
+        if isinstance(node, ast.Return):
+            v = node.value
+            if v is None or (isinstance(v, ast.Constant) and v.value is None):
+                return  # `return` / `return None` -> ignore (an Optional path)
+            if isinstance(v, ast.Call) and (name := _annotation_name(v.func)) is not None:
+                ctors.add(name)
+            else:
+                ambiguous = True  # returns a value we can't name -> don't guess a type
+            return
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+            return  # a nested scope's returns are its own
+        for child in ast.iter_child_nodes(node):
+            scan(child)
+
+    for stmt in fn.body:
+        scan(stmt)
+    return next(iter(ctors)) if len(ctors) == 1 and not ambiguous else None
 
 
 def _annotation_name(node: ast.expr | None) -> str | None:

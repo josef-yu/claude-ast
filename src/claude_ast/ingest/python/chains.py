@@ -26,6 +26,17 @@ from __future__ import annotations
 from .stubs import StubProvider
 
 KEEP = "keep"  # leave the definite external edge exactly as syntactic binding minted it
+_SELF = "Self"  # the generator's sentinel for a `Self` return — resolves to the receiver type
+
+
+def _member(typ: str, name: str, stubs: StubProvider) -> tuple[str, str] | None:
+    """A type member with covariant ``Self`` resolved: a method typed to return ``Self`` yields
+    the *receiver* type (``Path.cwd().parent`` -> ``Path``, not the defining ``PurePath``)."""
+    m = stubs.type_member(typ, name)
+    if m is None:
+        return None
+    kind, result = m
+    return (kind, typ if result == _SELF else result)
 
 
 def resolve_external_chain(dotted: str, stubs: StubProvider) -> str | tuple[str, str] | None:
@@ -53,7 +64,7 @@ def resolve_external_chain(dotted: str, stubs: StubProvider) -> str | tuple[str,
                 return None  # calling a module-level value -> type-dependent, decline
             state, ref = _advance(kind, typ, f"{ref}.{comp}", stubs)
         elif state == "type":
-            member = stubs.type_member(ref, comp)
+            member = _member(ref, comp, stubs)
             if member is None:
                 return None  # member absent on the known type (or type unmodeled) -> decline (#2)
             kind, typ = member
@@ -91,7 +102,7 @@ def chain_return_type(dotted: str, stubs: StubProvider) -> str | None:
                 return None
             final, (state, ref) = member, _advance(member[0], member[1], f"{ref}.{comp}", stubs)
         elif state == "type":
-            member = stubs.type_member(ref, comp)
+            member = _member(ref, comp, stubs)
             if member is None:
                 return None
             final, (state, ref) = member, _advance(member[0], member[1], ref, stubs)
@@ -115,7 +126,7 @@ def resolve_call_chain(root: str, members: tuple[str, ...], stubs: StubProvider)
     if typ is None:
         return None
     for name in members[:-1]:
-        member = stubs.type_member(typ, name)
+        member = _member(typ, name, stubs)
         if member is None or not member[1]:
             return None
         typ = member[1]  # a called method's return, an accessed property/value's type

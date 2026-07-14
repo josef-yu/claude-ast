@@ -61,6 +61,7 @@ def resolve_value_types(
     members = _members(files)
     bases = _bases(edges, by_id)
     methods_by_name = _methods_by_name(files)
+    returns = _return_types(files, reexports, by_id, all_ids)
 
     out: list[Edge] = []
     externals: list[Symbol] = []  # stub member nodes minted for out-of-tree receiver types
@@ -70,6 +71,28 @@ def resolve_value_types(
             if s.parent == fi.module:
                 module_defs.setdefault(s.name, s.id)
         for ref in fi.refs:
+            if ref.chain and ref.local_root:
+                # value-rooted call-return chain (`self.get().run()`): resolve the receiver's
+                # class, look up the receiver member's return type, then thread the chain.
+                r_root, _, r_member = ref.name.partition(".")
+                if "." in r_member:
+                    continue  # multi-member receiver (self.a.get) -> deferred
+                cls = (
+                    _self_class(ref.src, by_id) if r_root == "self"
+                    else resolve_type_name(
+                        ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
+                    ) if ref.receiver_type is not None
+                    else None
+                )
+                recv = _member_lookup(cls, r_member, members, bases) if cls else None
+                typ: SymbolId | None = returns.get(recv) if recv else None
+                for name in ref.chain[:-1]:
+                    hop = _member_lookup(typ, name, members, bases) if typ else None
+                    typ = returns.get(hop) if hop else None
+                target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
+                if target is not None:
+                    out.append(Edge(ref.src, target, ref.kind, Resolution.annotated(), ref.at))
+                continue
             if not ref.local_root:
                 continue
             root, _, attr = ref.name.partition(".")
@@ -82,6 +105,16 @@ def resolve_value_types(
                 class_id = resolve_type_name(
                     ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
                 )
+                if class_id is None:
+                    # the receiver may be a *call* whose return type is an in-tree class:
+                    # `s = make(); s.inner()` where `make() -> Service`. resolve_type_name declined
+                    # because `make` is a function, not a class — so follow its return annotation.
+                    callee = bind(
+                        ref.receiver_type, module_defs, fi.imports,
+                        all_ids, internal_roots, reexports,
+                    )
+                    if callee is not None and not callee[1]:
+                        class_id = returns.get(callee[0])
                 if class_id is None:
                     # external receiver type -> consult stubs for member existence off-tree
                     ext = resolve_external_type_name(

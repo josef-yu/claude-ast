@@ -32,6 +32,7 @@ from pathlib import Path
 import typeshed_client as tc
 
 OPAQUE = ""  # member exists but result type not modeled -> emit its edge, stop chaining
+SELF = "Self"  # a `Self`/typing.Self return -> the resolver substitutes the actual receiver type
 _BUILTINS = frozenset(dir(builtins))
 _SPECIAL_OPAQUE = frozenset({"Any", "object", "NoReturn", "Never", "None"})
 _NONE_ISH = frozenset({"None", "MaybeNone"})
@@ -42,7 +43,7 @@ _OUT = _ROOT / "src" / "claude_ast" / "ingest" / "python" / "_typeshed_table.py"
 
 SUPPORTED_VERSIONS: tuple[tuple[int, int], ...] = ((3, 12), (3, 13), (3, 14))
 PLATFORM = "linux"  # platform-specific modules (winreg/fcntl/…) are a documented follow-up
-GENERATOR_VERSION = 1
+GENERATOR_VERSION = 2  # bumped: `Self` returns now emit the SELF sentinel (covariant resolution)
 
 
 def spec_fingerprint() -> str:
@@ -110,12 +111,14 @@ class Extractor:
         if node is None or isinstance(node, ast.Constant):
             return OPAQUE
         if isinstance(node, ast.Name):
-            if node.id == "Self" and owner:
-                return owner
+            if node.id == "Self":
+                return SELF  # covariant: resolved to the receiver type at chain time, not `owner`
             if node.id in _SPECIAL_OPAQUE:
                 return OPAQUE
             return self.qualify(node.id, module) or OPAQUE
         if isinstance(node, ast.Attribute):
+            if node.attr == "Self":  # typing.Self / typing_extensions.Self / _typeshed.Self
+                return SELF
             dotted = _dotted(node)
             return (self.qualify(dotted, module) or OPAQUE) if dotted else OPAQUE
         if isinstance(node, ast.Subscript):

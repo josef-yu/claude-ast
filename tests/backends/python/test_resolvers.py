@@ -201,16 +201,16 @@ def test_reassigned_local_is_not_inferred_but_falls_to_the_heuristic(tmp_path):
     assert save == {("m.User.save", "heuristic"), ("m.Post.save", "heuristic")}
 
 
-def test_inference_does_not_bind_a_function_return_value(tmp_path):
+def test_inference_binds_a_function_return_value(tmp_path):
+    # `x = make(); x.save()` where `make` returns User (here inferred from `return User()`, with
+    # no annotation): x's type is make's return type, so the receiver call resolves to User.save.
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "def make():\n    return User()\n\n\n"
         "def run():\n    x = make()\n    return x.save()\n"
     )
     index = Index.build(tmp_path)
-
-    # `make` is a function, not a class; x's type is its return, which we don't infer.
-    assert "m.User.save" not in {d.id for d in index.find_dependencies("m.run")}
+    assert "m.User.save" in {d.id for d in index.find_dependencies("m.run")}
 
 
 def test_nested_shadow_does_not_inherit_the_outer_annotation(tmp_path):
