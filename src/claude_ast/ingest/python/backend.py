@@ -22,7 +22,7 @@ from .common import module_qualname
 from .refs import extract_refs
 from .stubs import STDLIB_STUBS, StubProvider
 from .symbols import extract_symbols
-from .typeres import resolve_value_types
+from .typeres import resolve_intree_chains, resolve_value_types
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +164,9 @@ class PythonIndexer:
         edges.extend(value_edges)
         for ext in stub_externals:
             externals.setdefault(ext.id, ext)
+        # Call-return chains whose receiver returns an in-tree type (`make() -> Service`;
+        # `make().run()` -> Service.run). Uses the INHERITS edges already in `edges`.
+        edges.extend(resolve_intree_chains(files, edges, reexports, internal_roots))
         # Call-site observations: `g(User())` -> a definite `g RECEIVES_ARG User` edge. A
         # usage fact, independent of the dispatch passes above (no edges needed as input).
         edges.extend(observe_arg_types(files, all_ids, internal_roots, reexports, by_id))

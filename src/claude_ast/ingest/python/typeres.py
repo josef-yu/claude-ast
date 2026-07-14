@@ -27,7 +27,7 @@ from collections.abc import Sequence
 
 from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
-from .binding import external_symbol, resolve_external_type_name, resolve_type_name
+from .binding import bind, external_symbol, resolve_external_type_name, resolve_type_name
 from .stubs import StubProvider
 
 
@@ -110,6 +110,73 @@ def resolve_value_types(
             if target is not None:
                 out.append(Edge(ref.src, target, ref.kind, resolution, ref.at))
     return out, externals
+
+
+def resolve_intree_chains(
+    files: Sequence[FileIndex],
+    edges: Sequence[Edge],
+    reexports: dict[str, dict[str, str]],
+    internal_roots: set[str],
+) -> list[Edge]:
+    """Call-return chains whose receiver returns an *in-tree* type: ``make().run()`` where
+    ``make() -> Service`` -> ``Service.run`` (MEDIUM). The external counterpart lives in
+    ``chains``; this one threads *in-tree* function return annotations through the same member
+    lookup the value resolvers use.
+
+    Runs after syntactic binding, so INHERITS edges exist for the base walk. Only ``chain`` refs
+    whose receiver binds to an in-tree function are handled — external receivers are resolved in
+    ``chains`` during binding; a receiver or hop with no resolvable return type declines the chain.
+    """
+    by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
+    all_ids = set(by_id)
+    members = _members(files)
+    bases = _bases(edges, by_id)
+    returns = _return_types(files, reexports, by_id, all_ids)
+
+    out: list[Edge] = []
+    for fi in files:
+        module_defs: dict[str, str] = {}
+        for s in fi.symbols:
+            if s.parent == fi.module:
+                module_defs.setdefault(s.name, s.id)
+        for ref in fi.refs:
+            if not ref.chain:
+                continue
+            recv = bind(ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports)
+            if recv is None or recv[1]:  # unresolved, or external (chains.py owns external)
+                continue
+            typ: SymbolId | None = returns.get(recv[0])
+            for name in ref.chain[:-1]:
+                member = _member_lookup(typ, name, members, bases) if typ else None
+                typ = returns.get(member) if member else None
+            target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
+            if target is not None:
+                out.append(Edge(ref.src, target, ref.kind, Resolution.annotated(), ref.at))
+    return out
+
+
+def _return_types(
+    files: Sequence[FileIndex],
+    reexports: dict[str, dict[str, str]],
+    by_id: dict[SymbolId, Symbol],
+    all_ids: set[SymbolId],
+) -> dict[SymbolId, SymbolId]:
+    """function/method id -> the in-tree CLASS id its return annotation names, when resolvable."""
+    returns: dict[SymbolId, SymbolId] = {}
+    for fi in files:
+        module_defs: dict[str, str] = {}
+        for s in fi.symbols:
+            if s.parent == fi.module:
+                module_defs.setdefault(s.name, s.id)
+        for sym in fi.symbols:
+            if sym.return_type is None:
+                continue
+            cls = resolve_type_name(
+                sym.return_type, module_defs, fi.imports, all_ids, reexports, by_id
+            )
+            if cls is not None:
+                returns[sym.id] = cls
+    return returns
 
 
 # A name defined as a method on more than this many classes is too ambiguous for the

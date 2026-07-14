@@ -75,7 +75,8 @@ def _visit(
             kind = SymbolKind.METHOD if container == "class" else SymbolKind.FUNCTION
             out.append(
                 Symbol(fid, child.name, kind, span(path, child),
-                       signature=_func_sig(child), doc=_docline(child), parent=prefix)
+                       signature=_func_sig(child), doc=_docline(child), parent=prefix,
+                       return_type=_annotation_name(child.returns))
             )
             _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, ast.Assign | ast.AnnAssign):
@@ -118,6 +119,24 @@ def _docline(
         stripped = line.strip()
         if stripped:
             return stripped
+    return None
+
+
+def _annotation_name(node: ast.expr | None) -> str | None:
+    """A return/type annotation as a resolvable name: a bare name (``Service``), an attribute
+    chain (``models.User``), or a string forward-ref (``"Service"``). A subscript / union
+    (``list[Service]``, ``Service | None``) yields ``None`` — left for later work."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
     return None
 
 

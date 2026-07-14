@@ -115,6 +115,46 @@ def test_property_hop_threads_through_an_accessed_member(tmp_path) -> None:
     assert "builtins.str.upper" in deps
 
 
+# --- in-tree call-return chaining, via function return annotations ---
+
+_INTREE = (
+    "class Inner:\n    def run(self): return 1\n\n\n"
+    "class Service:\n    def inner(self) -> Inner: return Inner()\n\n\n"
+    "def make() -> Service:\n    return Service()\n\n\n"
+)
+
+
+def test_intree_call_return_chain(tmp_path) -> None:
+    (tmp_path / "m.py").write_text(_INTREE + "def f():\n    return make().inner()\n")
+    deps = {(d.id, d.tier) for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert ("m.make", "definite") in deps            # the receiver call
+    assert ("m.Service.inner", "possible") in deps   # make() -> Service; .inner() resolves in-tree
+
+
+def test_intree_multi_hop_chain(tmp_path) -> None:
+    (tmp_path / "m.py").write_text(_INTREE + "def f():\n    return make().inner().run()\n")
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f", Confidence.LOW)}
+    assert {"m.make", "m.Service.inner", "m.Inner.run"} <= deps  # threads make->Service->Inner
+
+
+def test_intree_chain_declines_without_a_return_annotation(tmp_path) -> None:
+    # no `-> Service` -> make's return type is unknown -> the trailing member can't resolve
+    src = _INTREE.replace("def make() -> Service:", "def make():")
+    (tmp_path / "m.py").write_text(src + "def f():\n    return make().inner()\n")
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f", Confidence.LOW)}
+    assert "m.make" in deps
+    assert "m.Service.inner" not in deps
+
+
+def test_intree_chain_survives_a_warm_rebuild(tmp_path, monkeypatch) -> None:
+    # Symbol.return_type must round-trip, else warm rebuild loses the in-tree chain edge.
+    (tmp_path / "m.py").write_text(_INTREE + "def f():\n    return make().inner()\n")
+    monkeypatch.setenv("CLAUDE_AST_CACHE_DIR", str(tmp_path / "cache"))
+    cold = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    warm = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert "m.Service.inner" in cold and warm == cold
+
+
 def test_call_return_chain_survives_a_warm_rebuild(tmp_path, monkeypatch) -> None:
     # `then` must round-trip through the store, else the warm rebuild loses the chained edge.
     (tmp_path / "m.py").write_text(

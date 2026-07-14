@@ -44,7 +44,7 @@ def _span(v: list) -> Span:
 
 
 def _symbol_d(s: Symbol) -> dict[str, object]:
-    return {
+    d: dict[str, object] = {
         "i": s.id,
         "n": s.name,
         "k": s.kind.value,
@@ -53,6 +53,9 @@ def _symbol_d(s: Symbol) -> dict[str, object]:
         "d": s.doc,
         "pa": s.parent,
     }
+    if s.return_type is not None:
+        d["rt"] = s.return_type
+    return d
 
 
 def _symbol(v: dict) -> Symbol:
@@ -64,6 +67,7 @@ def _symbol(v: dict) -> Symbol:
         signature=v["g"],
         doc=v["d"],
         parent=v["pa"],
+        return_type=v.get("rt"),
     )
 
 

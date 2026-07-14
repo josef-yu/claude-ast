@@ -168,6 +168,10 @@ class Symbol:
     signature: str | None = None  # the def/class line, body dropped — for repo_map
     doc: str | None = None        # first line of the docstring — the free "summary"
     parent: SymbolId | None = None
+    # A function/method's return annotation as a resolvable type name (``Service``,
+    # ``models.User``, or a string forward-ref) — the fact that lets call-return chaining type
+    # ``make().run()`` in-tree. ``None`` when absent or not a plain name (subscript/union deferred).
+    return_type: str | None = None
 
 
 @dataclass(slots=True)
