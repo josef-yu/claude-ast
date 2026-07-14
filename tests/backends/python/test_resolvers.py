@@ -201,6 +201,41 @@ def test_reassigned_local_is_not_inferred_but_falls_to_the_heuristic(tmp_path):
     assert save == {("m.User.save", "heuristic"), ("m.Post.save", "heuristic")}
 
 
+def test_a_shadowed_constructor_name_does_not_type_the_receiver(tmp_path):
+    # `def f(User): x = User()` constructs the PARAMETER, not the module class — the
+    # inference must not bind through the shadowed name (a LOW name-match is the honest cap).
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def f(User):\n    x = User()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    assert "m.User.save" not in {d.id for d in index.find_dependencies("m.f")}  # no MEDIUM edge
+    edge = next(e for e in index.graph.out_edges("m.f") if e.dst == "m.User.save")
+    assert edge.resolution.source.value == "heuristic"  # untyped receiver -> LOW, not inference
+
+
+def test_a_rebound_local_drops_its_inferred_type(tmp_path):
+    # `x = User(); x = 5` — flow-insensitively, User no longer holds at every use of x,
+    # so the construction must not type the later receiver call.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def f():\n    x = User()\n    x = 5\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert "m.User.save" not in {d.id for d in index.find_dependencies("m.f")}
+
+
+def test_a_loop_rebound_local_drops_its_inferred_type(tmp_path):
+    # any non-construction rebinding poisons the type — `for x in ...` included.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def f(items):\n    x = User()\n    for x in items:\n        pass\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert "m.User.save" not in {d.id for d in index.find_dependencies("m.f")}
+
+
 def test_inference_binds_a_function_return_value(tmp_path):
     # `x = make(); x.save()` where `make` returns User (here inferred from `return User()`, with
     # no annotation): x's type is make's return type, so the receiver call resolves to User.save.

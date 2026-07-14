@@ -141,9 +141,11 @@ class PythonIndexer:
                 if is_external:
                     externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))
-        # `from pkg import submodule` names a MODULE the from-module IMPORT ref doesn't capture.
-        # The import map already resolved each imported name to a qualname; add those that are
-        # in-tree modules, deduped against the spanned from-module edges above (span-less here).
+        # `from pkg import submodule` now arrives as a spanned candidate ref; what the refs still
+        # don't carry is the *top-name* binding of a dotted plain import (`import a.b` binds `a` —
+        # a real dependency on package `a` with no ref of its own). The import map resolved each
+        # bound name to a qualname; add the in-tree-module targets, deduped against the spanned
+        # edges above (span-less here).
         seen_imports = {(e.src, e.dst) for e in edges if e.kind is EdgeKind.IMPORT}
         for fi in files:
             for target in fi.imports.values():

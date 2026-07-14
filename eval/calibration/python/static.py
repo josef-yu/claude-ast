@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import sys
 from pathlib import Path
 
 from claude_ast.model import Graph
@@ -86,7 +87,9 @@ def _importable(dst: str) -> StaticVerdict:
 
     ``os.path.join`` -> import ``os`` (then ``os.path``), getattr ``join``. Import failure is
     ``SKIPPED`` (an environment gap, not a refutation); a resolvable module with a missing
-    attribute *is* a refutation.
+    attribute is a refutation — except on the **stdlib**, whose surface is routinely platform/
+    version-gated (``ctypes.WinDLL`` exists only on Windows, ``uuid.uuid7`` only on 3.14+):
+    there, absence in *this* interpreter is no evidence, so it SKIPs rather than refutes.
     """
     parts = dst.split(".")
     mod = None
@@ -104,5 +107,7 @@ def _importable(dst: str) -> StaticVerdict:
     for attr in parts[depth:]:
         obj = getattr(obj, attr, None)
         if obj is None:
+            if parts[0] in sys.stdlib_module_names:
+                return StaticVerdict.SKIPPED  # a gated stdlib attr, not a bogus target
             return StaticVerdict.REFUTED
     return StaticVerdict.CONFIRMED

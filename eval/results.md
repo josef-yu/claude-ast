@@ -515,3 +515,20 @@ skips, one-app runtime slice.
 (`external`'s 3 refutations are the adjudicated env artifacts above; its 234 skips are modules that don't
 import in this venv, and `mro`'s 6,021 skips are the model classes gated on `django.setup()` — honest skips,
 not passes.)
+
+## Post-correctness-pass re-run (engine + harness fixes)
+
+A follow-up Django run after the engine-correctness pass (inference rebinding/shadow guards, spanned
+submodule-import refs; harness: env-gated stdlib attrs → SKIPPED, identity-matched external construction):
+
+- **Candidate false-definites 3 → 0** — the reconciliation is fully clean for the first time (`WinDLL`/`uuid7`
+  now honest skips: external refuted 3 → 0, skipped 234 → 237).
+- **Definite unchanged: 97% strict**, same traced set — tightening the construction check from leaf-name to
+  object identity cost nothing, i.e. the old leniency wasn't propping the number up.
+- **Inference −51 / stub −48 edges** (stale types on rebound locals, the guards' target) at unchanged measured
+  precision (inference 85/90 on the same 183 traced — the removed edges were unexercised or wrong).
+- **Heuristic +5,069 edges (19,047 → 24,116) at identical 17%/27%** — receivers that used to carry a wrong
+  hidden type are now honestly untyped and fall to the capped LOW name-match; the default `medium` floor
+  excludes every one of them.
+- **Import +91 edges** — repeated/conditional `from pkg import sub` sites now each carry a span (100%
+  static-confirmed), and `importers --source` can print them.

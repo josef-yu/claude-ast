@@ -50,13 +50,15 @@ def extract_refs(
 
 
 def _import_refs(tree: ast.Module, module: str, package: str, path: str) -> list[RawRef]:
-    """Module-level imports as ``IMPORT`` refs: importing module -> the *from-module* it depends on.
+    """Module-level imports as ``IMPORT`` refs: importing module -> the module(s) it depends on.
 
     ``import a.b`` and ``from a.b import c`` both yield the from-module ``a.b`` (relative imports
-    anchored on ``package``); binding keeps only those that resolve to an in-tree module, so the
-    graph carries the internal module-dependency edges — the thing text search can't cheaply give
-    (especially the reverse: *who imports this module*). Module scope only — a function-local import
-    is not a module-wide dependency.
+    anchored on ``package``); a from-import additionally yields each imported name's *candidate*
+    qualname (``from pkg import sub`` -> ``pkg.sub``), because the name may be a submodule —
+    binding keeps only targets that resolve to an in-tree module, so a plain-symbol import's
+    candidate simply drops. The graph thus carries the internal module-dependency edges — the
+    thing text search can't cheaply give (especially the reverse: *who imports this module*).
+    Module scope only — a function-local import is not a module-wide dependency.
     """
     refs: list[RawRef] = []
 
@@ -76,6 +78,11 @@ def _import_refs(tree: ast.Module, module: str, package: str, path: str) -> list
                     mod = child.module or ""
                 if mod:
                     refs.append(RawRef(module, EdgeKind.IMPORT, mod, span(path, child)))
+                    for alias in child.names:
+                        if alias.name != "*":
+                            refs.append(RawRef(
+                                module, EdgeKind.IMPORT, f"{mod}.{alias.name}", span(path, child)
+                            ))
             else:
                 scan(child)
 
@@ -140,7 +147,7 @@ def _visit(
         inner = [*locals_, fn_locals]
         inner_types = {
             **{n: v for n, v in types.items() if n not in fn_locals},
-            **{name: (t, True) for name, t in _inferred_types(node).items()},
+            **{name: (t, True) for name, t in _inferred_types(node, inner).items()},
             **{name: (t, False) for name, t in _annotated_types(node).items()},
         }
         for stmt in node.body:
@@ -321,33 +328,51 @@ def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, st
     return types
 
 
-def _inferred_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
+def _inferred_types(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, locals_: list[frozenset[str]]
+) -> dict[str, str]:
     """Local name -> the type it is constructed from (``x = User()`` -> ``x: User``), for
     the inference resolver.
 
-    Flow-insensitive and conservative: a name assigned from more than one distinct
-    constructor is *dropped* (ambiguous — don't guess). The candidate is the callee name;
-    the resolver keeps it only if it resolves to a class (``x = helper()`` where helper is
-    a function yields no edge). Nested scopes are not descended; reassignment and
-    non-construction RHS (``x = other()``) are deferred to a flow-sensitive resolver.
+    Flow-insensitive and conservative, so a name keeps a type only when every binding
+    agrees. Dropped — never guessed: a name assigned from two distinct constructors; a
+    constructor whose name is shadowed by a local (``def f(User): x = User()`` constructs
+    the *parameter*, not the module class); and a name *re-bound by anything else*
+    (``x = User(); x = 5`` / ``for x in ...`` — the type no longer holds at every use).
+    The candidate is the callee name; the resolver keeps it only if it resolves to a class
+    (``x = helper()`` where helper is a function yields no edge). Nested scopes are not
+    descended; true flow-sensitivity (per-use types) stays deferred.
     """
     candidates: dict[str, set[str]] = {}
+    rebound: set[str] = set()  # names also bound to a value we can't type
 
     def scan(node: ast.AST) -> None:
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
             return  # a separate scope — its assignments are not this function's
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
             ctor = _dotted_name(node.value.func)
-            if ctor is not None:
+            if ctor is not None and not _local(ctor.partition(".")[0], locals_):
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         candidates.setdefault(target.id, set()).add(ctor)
+                    else:
+                        _add_target(target, rebound)  # unpacking a call result — untyped
+            else:
+                _add_bound(node, rebound)  # a value we can't name rebinds the targets
+            for child in ast.iter_child_nodes(node.value):
+                scan(child)  # a walrus inside the call's own args still binds
+            return
+        _add_bound(node, rebound)
         for child in ast.iter_child_nodes(node):
             scan(child)
 
     for stmt in fn.body:
         scan(stmt)
-    return {name: next(iter(ctors)) for name, ctors in candidates.items() if len(ctors) == 1}
+    return {
+        name: next(iter(ctors))
+        for name, ctors in candidates.items()
+        if len(ctors) == 1 and name not in rebound
+    }
 
 
 def _all_args(args: ast.arguments) -> list[ast.arg]:

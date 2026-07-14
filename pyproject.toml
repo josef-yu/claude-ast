@@ -47,9 +47,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "src/claude_ast/ingest/python/_typeshed_table.py" = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "eval"]
 exclude = ["tests/fixtures"]
-extraPaths = ["src"]
+extraPaths = ["src", "eval"]
 pythonVersion = "3.12"
 typeCheckingMode = "standard"
 

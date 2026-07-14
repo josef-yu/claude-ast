@@ -61,6 +61,19 @@ def test_from_parent_import_submodule_registers_the_submodule(tmp_path):
     assert "pkg.user" in {r.id for r in index.find_importers("pkg")}         # and the package
 
 
+def test_from_import_of_a_submodule_carries_its_span(tmp_path):
+    # The submodule edge must locate its import statement (importers --source depends on it).
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "sub.py").write_text("")
+    (tmp_path / "main.py").write_text("import os\nfrom pkg import sub\n")
+    index = Index.build(tmp_path)
+
+    (ref,) = index.find_importers("pkg.sub")
+    assert ref.id == "main" and ref.at is not None and ref.at.line == 2
+
+
 def test_function_local_import_is_not_a_module_dependency(tmp_path):
     (tmp_path / "a.py").write_text("def x():\n    return 1\n")
     (tmp_path / "b.py").write_text("def y():\n    from a import x\n    return x()\n")

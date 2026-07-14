@@ -180,15 +180,35 @@ class PythonRuntimeOracle(RuntimeOracle):
         return False
 
     def _is_construction(self, dst: str, dst_leaf: str, rec: EdgeRecord, obs: set[str]) -> bool:
-        """A construction ran at the site: a constructor on ``dst`` (or an in-tree ancestor,
-        or — matched by class leaf — an external class), or a dataclass's generated init."""
+        """A construction ran at the site: a constructor on ``dst`` or an ancestor (in-tree
+        ancestry via INHERITS — which includes an external base an in-tree class inherits its
+        ``__init__`` from), a dataclass's generated init, or — for an external class — the
+        class's *runtime* constructor matched by object identity (``getattr`` walks the MRO, so
+        an inherited ``__init__`` matches at its defining class), never by bare name. The old
+        leaf-name match survives only as the fallback when the class can't be imported in this
+        env — there, name evidence is all that exists; identity failure must not refute blind."""
         owners = ancestors(self._graph, dst) if rec.dst_kind == "class" else {dst}
         dst_mod = module_of(dst, self._modules)
         for o in obs:
-            parts = o.split(".")
-            owner_leaf = parts[-2] if len(parts) >= 2 else ""
-            if parts[-1] in _CTOR and (class_of(o) in owners or owner_leaf == dst_leaf):
+            if o.rsplit(".", 1)[-1] in _CTOR and class_of(o) in owners:
                 return True
             if "__create_fn__" in o and dst_mod is not None and o.startswith(dst_mod + "."):
                 return True
-        return False
+        if not rec.external:
+            return False
+        cls = resolve_object(dst, self._modules)
+        if not isinstance(cls, type):
+            return any(
+                (parts := o.split("."))[-1] in _CTOR
+                and len(parts) >= 2
+                and parts[-2] == dst_leaf
+                for o in obs
+            )
+        forms: set[str] = set()
+        for name in _CTOR:
+            fn = getattr(cls, name, None)
+            code = getattr(fn, "__code__", None)
+            glob = getattr(fn, "__globals__", None)
+            if code is not None and glob is not None:
+                forms.add(f"{glob.get('__name__', '')}.{code.co_qualname}")
+        return bool(forms & obs)
