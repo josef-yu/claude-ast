@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 14  # IMPORT refs now emitted (module-dependency edges) — persisted refs changed
+_SCHEMA_VERSION = 15  # RawRef.chain: call-return chaining (`a().b().c()`) — persisted refs changed
 
 
 class SqliteStore(Store):

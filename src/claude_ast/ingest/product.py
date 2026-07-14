@@ -37,6 +37,14 @@ class RawRef:
     turns each into a definite ``RECEIVES_ARG`` edge (see ``callsite.py``). Constructions
     only, positional only, truncated at the first ``*args`` (positional alignment breaks
     past a splat), a shadowed constructor name dropped; trailing ``None``s are trimmed.
+
+    ``chain`` supports call-return chaining (``re.compile(p).match(s).group()``): ``name`` is
+    the *receiver* call (``re.compile``) and ``chain`` the ordered members reached on its return
+    value, the last being the one this ref calls (``("match", "group")`` for the outer
+    ``.group()``). The resolver threads the receiver's return type through the typeshed tables,
+    advancing type by type across the leading members and emitting a possible/STUB edge for the
+    last — or nothing. Each call in a chain is captured at its own node with its own last member,
+    so the edges never overlap; the innermost call (``re.compile``) is the ordinary flat ref.
     """
 
     src: SymbolId  # the enclosing symbol making the reference
@@ -47,6 +55,7 @@ class RawRef:
     receiver_type: str | None = None
     receiver_inferred: bool = False
     arg_types: tuple[str | None, ...] = ()
+    chain: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)

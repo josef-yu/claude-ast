@@ -1,0 +1,127 @@
+"""Python backend — external call-chain resolution through the typeshed tables (finding #2).
+
+A module-rooted call chain that stays in module namespace (``os.path.join``) is a definite
+external fact; one that crosses into a value whose members are type-dependent
+(``sys.stdout.getvalue``) must NOT be a definite edge. The evaluator keeps the module-fact
+prefix definite, downgrades a real value-type member to a possible STUB edge, and declines a
+member absent on the declared type. Unit tests pin the evaluator; integration tests drive it
+through the whole engine.
+"""
+
+from claude_ast.index import Index
+from claude_ast.ingest.python.chains import KEEP, chain_return_type, resolve_external_chain
+from claude_ast.ingest.python.stubs import STDLIB_STUBS
+from claude_ast.model import Confidence
+
+S = STDLIB_STUBS
+
+
+def test_module_fact_chains_keep_definite() -> None:
+    # every hop is module namespace -> the definite external edge stands
+    assert resolve_external_chain("os.path.join", S) == KEEP
+    assert resolve_external_chain("os.getcwd", S) == KEEP
+    assert resolve_external_chain("builtins.len", S) == KEEP
+
+
+def test_value_member_downgrades_to_a_stub_target() -> None:
+    # sys.stdout is a value typed TextIO; `write` IS a TextIO member -> a possible STUB edge
+    # to the type member, not a definite edge to the syntactic chain.
+    assert resolve_external_chain("sys.stdout.write", S) == ("stub", "typing.TextIO.write")
+
+
+def test_absent_value_member_declines() -> None:
+    # the crux of #2: TextIO has no getvalue (that is io.StringIO's), so the chain declines.
+    assert resolve_external_chain("sys.stdout.getvalue", S) is None
+
+
+def test_unknown_library_root_keeps_definite() -> None:
+    # no shape data for a third-party root -> never downgrade (recall guard)
+    assert resolve_external_chain("numpy.array", S) == KEEP
+    assert resolve_external_chain("requests.get", S) == KEEP
+
+
+def test_unknown_module_member_keeps_definite() -> None:
+    # a module attribute we did not extract must not be dropped -> stays a definite module fact
+    assert resolve_external_chain("os.a_member_we_did_not_extract", S) == KEEP
+
+
+def test_finding_2_declines_end_to_end(tmp_path) -> None:
+    (tmp_path / "m.py").write_text("import sys\n\n\ndef f():\n    return sys.stdout.getvalue()\n")
+    index = Index.build(tmp_path)
+    # no edge at any confidence — not a false definite external anymore
+    assert index.find_dependencies("m.f", Confidence.LOW) == []
+    assert not index.graph.is_external("sys.stdout.getvalue")
+
+
+def test_value_member_is_a_possible_external_edge_end_to_end(tmp_path) -> None:
+    (tmp_path / "m.py").write_text("import sys\n\n\ndef f():\n    sys.stdout.write('x')\n")
+    index = Index.build(tmp_path)
+    deps = {(d.id, d.tier, d.external) for d in index.find_dependencies("m.f")}
+    assert ("typing.TextIO.write", "possible", True) in deps
+
+
+def test_module_fact_stays_definite_end_to_end(tmp_path) -> None:
+    (tmp_path / "m.py").write_text("import os\n\n\ndef f():\n    os.path.join('a', 'b')\n")
+    index = Index.build(tmp_path)
+    deps = {(d.id, d.tier, d.external) for d in index.find_dependencies("m.f")}
+    assert ("os.path.join", "definite", True) in deps
+
+
+# --- call-return chaining: `Path.cwd().exists()` ---
+
+
+def test_chain_return_type_threads_a_call() -> None:
+    assert chain_return_type("pathlib.Path.cwd", S) == "pathlib.Path"  # classmethod -> Path
+    assert chain_return_type("re.compile", S) == "re.Pattern"          # func return type
+    assert chain_return_type("os.getcwd", S) == "builtins.str"
+    assert chain_return_type("sys.stdout", S) is None                  # a value isn't callable
+
+
+def test_call_return_chain_resolves_the_trailing_member(tmp_path) -> None:
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef f():\n    return Path.cwd().exists()\n"
+    )
+    deps = {(d.id, d.tier) for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert ("pathlib.Path.cwd", "possible") in deps       # the inner call
+    assert ("pathlib.Path.exists", "possible") in deps    # the chained `.exists()` on its return
+
+
+def test_call_return_chain_declines_an_absent_trailing_member(tmp_path) -> None:
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef f():\n    return Path.cwd().no_such()\n"
+    )
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert "pathlib.Path.cwd" in deps               # inner call still resolves
+    assert not any("no_such" in d for d in deps)    # the absent trailing member declines
+
+
+def test_multi_hop_chain_emits_an_edge_per_call(tmp_path) -> None:
+    # re.compile(p).match(s).group() -> compile (definite) + Pattern.match + Match.group (possible)
+    (tmp_path / "m.py").write_text(
+        "import re\n\n\ndef f():\n    return re.compile('x').match('y').group()\n"
+    )
+    deps = {(d.id, d.tier) for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert ("re.compile", "definite") in deps
+    assert ("re.Pattern.match", "possible") in deps
+    assert ("re.Match.group", "possible") in deps
+
+
+def test_property_hop_threads_through_an_accessed_member(tmp_path) -> None:
+    # Path.cwd().name.upper() : cwd() -> Path, .name (property) -> str, .upper() -> str.upper
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef f():\n    return Path.cwd().name.upper()\n"
+    )
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert "builtins.str.upper" in deps
+
+
+def test_call_return_chain_survives_a_warm_rebuild(tmp_path, monkeypatch) -> None:
+    # `then` must round-trip through the store, else the warm rebuild loses the chained edge.
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef f():\n    return Path.cwd().exists()\n"
+    )
+    monkeypatch.setenv("CLAUDE_AST_CACHE_DIR", str(tmp_path / "cache"))
+    cold = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    warm = {d.id for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert "pathlib.Path.exists" in cold
+    assert warm == cold

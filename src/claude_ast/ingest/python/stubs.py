@@ -21,8 +21,8 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
-# The generated frozen table + the fingerprint of the spec it was built from. Guarded so
-# the generator (which imports this module for the spec) works before the table exists.
+# The generated frozen tables + the fingerprint of the spec each was built from. Guarded so
+# the generators (which import this module for the spec) work before the tables exist.
 try:
     from ._stub_table import FINGERPRINT as TABLE_FINGERPRINT
     from ._stub_table import TABLE
@@ -30,23 +30,45 @@ except ImportError:  # not yet generated (bootstrap)
     TABLE: dict[str, frozenset[str]] = {}
     TABLE_FINGERPRINT = ""
 
+try:
+    from ._typeshed_table import CLASSES as _TS_CLASSES
+    from ._typeshed_table import MODULES as _TS_MODULES
+except ImportError:  # not yet generated (bootstrap)
+    _TS_MODULES: dict[str, dict[str, tuple[str, str]]] = {}
+    _TS_CLASSES: dict[str, dict[str, tuple[str, str]]] = {}
+
 
 class StubProvider(Protocol):
-    """Answers "does external type ``type_qualname`` have a callable member ``attr``?".
+    """Typeshed knowledge for external (out-of-tree) types, behind a seam so a future
+    environment-aware provider (PEP 561 / ``django-stubs``) composes in without touching the
+    resolvers. Every method returns ``None``/``False`` to DECLINE (out of scope) — never a guess.
 
-    Knowledge only — the caller forms the external member id and mints the node, so a
-    stub-resolved ``pathlib.Path.exists`` is the SAME external node as a directly-imported
-    one. ``False`` DECLINES (member absent or type out of scope); it never guesses.
+    ``member`` answers member-existence (the value-receiver path). ``has_module`` /
+    ``module_member`` / ``type_member`` are the shape+type lookups the chain evaluator threads:
+    a ``(kind, result_type)`` pair where kind is ``value|func|class|submodule|method`` and
+    result_type is a qualname, ``""`` (OPAQUE), or a class qualname.
     """
 
     def member(self, type_qualname: str, attr: str) -> bool: ...
+    def has_module(self, qualname: str) -> bool: ...
+    def module_member(self, module: str, name: str) -> tuple[str, str] | None: ...
+    def type_member(self, type_qualname: str, attr: str) -> tuple[str, str] | None: ...
 
 
 class StdlibStubs:
-    """The default hermetic provider: a pure lookup over the frozen stdlib table."""
+    """The default hermetic provider: pure lookups over the frozen stdlib tables."""
 
     def member(self, type_qualname: str, attr: str) -> bool:
         return attr in TABLE.get(type_qualname, frozenset())
+
+    def has_module(self, qualname: str) -> bool:
+        return qualname in _TS_MODULES
+
+    def module_member(self, module: str, name: str) -> tuple[str, str] | None:
+        return _TS_MODULES.get(module, {}).get(name)
+
+    def type_member(self, type_qualname: str, attr: str) -> tuple[str, str] | None:
+        return _TS_CLASSES.get(type_qualname, {}).get(attr)
 
 
 STDLIB_STUBS: StubProvider = StdlibStubs()

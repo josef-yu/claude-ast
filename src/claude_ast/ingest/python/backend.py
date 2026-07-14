@@ -17,6 +17,7 @@ from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolKind
 from ..product import FileIndex, ResolveResult
 from .binding import bind, external_symbol
 from .callsite import observe_arg_types
+from .chains import KEEP, resolve_call_chain, resolve_external_chain
 from .common import module_qualname
 from .refs import extract_refs
 from .stubs import STDLIB_STUBS, StubProvider
@@ -106,10 +107,37 @@ class PythonIndexer:
                     continue
                 if ref.local_root:
                     continue  # value receiver — the type resolvers own it, not syntactic binding
+                if ref.chain:
+                    # call-return chain (`re.compile(p).match(s).group()`): thread the receiver's
+                    # return type through the members -> a possible STUB edge on the last, else
+                    # nothing. Only external (typeshed-typed) receivers are threadable today.
+                    recv = bind(
+                        ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports
+                    )
+                    if recv is None or not recv[1]:
+                        continue
+                    target = resolve_call_chain(recv[0], ref.chain, self._stubs)
+                    if target is None:
+                        continue
+                    externals.setdefault(target, external_symbol(target))
+                    edges.append(Edge(ref.src, target, ref.kind, Resolution.stubbed(), ref.at))
+                    continue
                 bound = bind(ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports)
                 if bound is None:
                     continue
                 dst, is_external = bound
+                # An external CALL chain that crosses into a value (`sys.stdout.getvalue`) is not a
+                # definite module fact — walk it through the typeshed tables to keep the module-fact
+                # prefix definite, downgrade a value member to a possible STUB edge, or decline it.
+                if is_external and ref.kind is EdgeKind.CALL and "." in dst:
+                    decision = resolve_external_chain(dst, self._stubs)
+                    if decision is None:
+                        continue  # type-dependent member we can't confirm -> report nothing
+                    if decision is not KEEP:
+                        _, target = decision
+                        externals.setdefault(target, external_symbol(target))
+                        edges.append(Edge(ref.src, target, ref.kind, Resolution.stubbed(), ref.at))
+                        continue
                 if is_external:
                     externals.setdefault(dst, external_symbol(dst))
                 edges.append(Edge(ref.src, dst, ref.kind, Resolution.syntactic(), ref.at))

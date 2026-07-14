@@ -194,6 +194,17 @@ def _visit(
                         receiver_inferred=rinferred,
                     )
                 )
+        else:
+            # callee rooted at a *value*, not a name. One case we can still resolve: a call whose
+            # receiver is itself a name-rooted call, `re.compile(p).match(s).group()` — record the
+            # receiver call (`re.compile`) + the ordered members reached on its return
+            # (`("match", "group")`) for the chain resolver.
+            chain = _call_chain(node)
+            if chain is not None and not _local(chain[0].partition(".")[0], locals_):
+                receiver, members = chain
+                refs.append(
+                    RawRef(enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members)
+                )
 
     for child in ast.iter_child_nodes(node):
         _visit(child, enclosing, path, refs, locals_, types, node_ids)
@@ -201,6 +212,43 @@ def _visit(
 
 def _local(name: str, locals_: list[frozenset[str]]) -> bool:
     return any(name in scope for scope in locals_)
+
+
+def _call_chain(node: ast.Call) -> tuple[str, tuple[str, ...]] | None:
+    """Decompose a call whose receiver is itself a name-rooted call into the receiver call plus
+    the ordered members reached on its return. ``re.compile(p).match(s).group()`` ->
+    ``("re.compile", ("match", "group"))``; ``Path.cwd().exists()`` -> ``("Path.cwd", ("exists",))``
+    (the receiver call ``re.compile`` / ``Path.cwd`` is captured separately as the flat ref).
+
+    The postfix chain flattens to a root name + a list of ops (attribute access / call). The
+    receiver is the root plus the accesses before the *first* call; the members after it are the
+    chain (the last, always a call, is what this ref invokes). A value-rooted chain (``obj.m()``),
+    a subscript, or no leading call yields ``None`` — left for the value resolvers or later work.
+    """
+    ops: list[str | None] = []  # str = attribute access; None = a call
+    cur: ast.expr = node
+    while True:
+        if isinstance(cur, ast.Call):
+            ops.append(None)
+            cur = cur.func
+        elif isinstance(cur, ast.Attribute):
+            ops.append(cur.attr)
+            cur = cur.value
+        elif isinstance(cur, ast.Name):
+            root = cur.id
+            break
+        else:
+            return None  # rooted at a subscript / literal / value
+    ops.reverse()
+    if None not in ops or ops[-1] is not None:
+        return None  # no leading call, or the outermost op isn't the call we're resolving
+    first_call = ops.index(None)
+    lead = ops[:first_call]
+    if any(o is None for o in lead):  # the receiver prefix must be a plain dotted name
+        return None
+    receiver = ".".join([root, *(str(o) for o in lead)])
+    members = tuple(o for o in ops[first_call + 1 :] if o is not None)
+    return (receiver, members) if members else None
 
 
 def _dotted_name(node: ast.expr) -> str | None:

@@ -77,6 +77,8 @@ def _ref_d(r: RawRef) -> dict[str, object]:
         d["ri"] = 1
     if r.arg_types:
         d["ca"] = list(r.arg_types)  # JSON has no tuple — re-tuple on load so warm == cold
+    if r.chain:
+        d["ch"] = list(r.chain)  # JSON has no tuple — re-tuple on load so warm == cold
     return d
 
 
@@ -90,4 +92,5 @@ def _ref(v: dict) -> RawRef:
         receiver_type=v.get("rt"),
         receiver_inferred=bool(v.get("ri")),
         arg_types=tuple(v["ca"]) if "ca" in v else (),
+        chain=tuple(v["ch"]) if "ch" in v else (),
     )
