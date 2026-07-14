@@ -416,3 +416,102 @@ without making it *lie more*.
   tight. The static audit (100%, large-N) is the load-bearing correctness check.
 - **Django runtime is a floor**, not a verdict, for the new edges (2% stub coverage, C-method attribution); its
   runtime driver also needs `asgiref`/`sqlparse`/`tzdata`, currently supplied via `uv run --with` (not in the lock).
+
+---
+
+# v5 addendum — the annotation 95% → 69% drop, explained (and two fixes)
+
+**Verdict: not a resolver regression — a composition shift the harness misread.** Chasing the one number v5
+left unexplained (annotation strict fell 95% → 69% between v4 and v5) surfaced one real engine defect and one
+harness classification gap; with both fixed, **annotation family is 100%** (strict stays 69%, correctly).
+
+## Fix 1 — chain edges now carry honest source provenance (engine)
+
+Both chain resolvers stamped `Resolution.annotated()` unconditionally — including `self`-rooted chains, inferred
+receivers (`s = make(); …`), and chains threaded through *body-inferred* return types (`def make(): return
+Service()`). `Symbol.return_type` now records whether it was declared or inferred (`return_type_inferred`,
+schema 17), and a chain edge is ANNOTATION only when **every** fact it used was declared — any inferred hop makes
+it INFERENCE. Pinned by five new backend tests (including a warm-rebuild round-trip of the provenance flag).
+On claude-ast's own fully-annotated src this moved **zero** edges — which is itself the diagnostic: the 69% was
+not mislabeled inference.
+
+## Fix 2 — protocol dispatch is family, not a miss (harness)
+
+All 9 annotation misses were the same shape: the edge names a **`typing.Protocol` member**
+(`stubs: StubProvider` → `StubProvider.type_member`) and runtime dispatched to a structural implementor
+(`StdlibStubs.type_member`). Structural typing leaves no INHERITS edge, so `related_classes` couldn't see the
+kinship and bucketed it `SAME_NAME`. A new `PROTOCOL` verdict checks the runtime objects (`__protocol_attrs__`,
+never by name) and counts toward *family* — the exact analogue of OVERRIDE: the annotation named the static
+type; dispatch went to an implementation. That is the `possible` disclaimer materializing, not an error.
+
+## Why v4 → v5 moved
+
+The Tier-2 refactor threaded `stubs: StubProvider` parameters through the resolvers, adding 12 annotation
+edges of which 9 are protocol-typed receivers — a population shift toward exactly the dispatch the old
+family definition couldn't credit.
+
+## The curve after both fixes (src, full runtime coverage)
+
+| confidence | tier | trace | strict | family (was) |
+|---|---|--:|--:|--:|
+| **high** | definite | 331 | 99% | 99% (99%) |
+| **medium** | possible | 75 | 85% | **97%** (85%) |
+| **low** | possible | 10 | 50% | **100%** (90%) |
+
+By source: annotation 69% strict / **100% family**; stub 95%/95%; inference 100%; heuristic 50% / 100% family.
+Zero candidate false-definites, static audit 100% confirmed — both unchanged.
+
+## Reading it
+
+The strict column is untouched — these fixes claim nothing new about exact dispatch. What changed is the
+*explanation* of the gap: every annotation miss is now provably override-or-protocol dispatch, i.e. the
+uncertainty MEDIUM was designed to disclose, with **0% contradicted**. The relabeling matters little on this
+fully-annotated codebase but matters a lot on unannotated ones (Django's chains thread through inferred returns,
+which were polluting the ANNOTATION bucket) — the Django re-run should now attribute per-source precision
+honestly.
+
+## Django re-run (post-fix): confirmed
+
+Same invocation as v5 (repo root, `dispatch` app traced). Everything stable — definite **97% strict**, static
+audit 100% on every decided check, candidate false-definites still exactly the 3 known platform/version env
+artifacts (`WinDLL` ×2, `uuid7`; 31 further runtime contradictions were all static-confirmed C-level blind
+spots). The relabel lands as predicted: Django's **ANNOTATION bucket is now empty** (the codebase is
+essentially unannotated), and every in-tree typed resolution sits honestly in INFERENCE — a homogeneous,
+well-calibrated population where a mislabeled mixture used to be. The PROTOCOL verdict correctly stayed silent
+(low unchanged: Django's polymorphism is nominal, already credited via INHERITS) — evidence it credits
+structure, not leniency. Unchanged: stub's floor (2% coverage, C-method attribution), `mro`'s setup-gated
+skips, one-app runtime slice.
+
+### Calibration curve (dispatch precision by confidence level)
+
+| confidence | tier | edges | traceable | strict | family |
+|---|---|--:|--:|--:|--:|
+| **high** | definite | 62,535 | 1,606 | **97%** | 97% |
+| **medium** | possible | 22,381 | 208 | 81% | 85% |
+| **low** | possible | 19,047 | 1,181 | **17%** | 27% |
+
+### By resolution source (the possible tier, unpacked)
+
+| source | tier | edges | traceable | strict | family |
+|---|---|--:|--:|--:|--:|
+| inference | possible | 21,159 | 183 | **85%** | 90% |
+| stub | possible | 1,222 | 25 | 52% | 52% |
+| heuristic | possible | 19,047 | 1,181 | 17% | 27% |
+| annotation | possible | **0** | — | — | — |
+
+### Static decidable audit (all 122k edges, independent of the resolver)
+
+| check | tier | edges | confirmed | refuted | skipped | precision |
+|---|---|--:|--:|--:|--:|--:|
+| existence | definite | 36,484 | 36,484 | 0 | 0 | 100% |
+| existence | possible | 40,206 | 40,206 | 0 | 0 | 100% |
+| builtin | definite | 16,536 | 16,536 | 0 | 0 | 100% |
+| builtin | possible | 531 | 531 | 0 | 0 | 100% |
+| import | definite | 10,027 | 10,027 | 0 | 0 | 100% |
+| external | definite | 9,550 | 9,313 | 3 | 234 | 100% |
+| external | possible | 691 | 691 | 0 | 0 | 100% |
+| mro | definite | 8,844 | 2,823 | 0 | 6,021 | 100% |
+
+(`external`'s 3 refutations are the adjudicated env artifacts above; its 234 skips are modules that don't
+import in this venv, and `mro`'s 6,021 skips are the model classes gated on `django.setup()` — honest skips,
+not passes.)
