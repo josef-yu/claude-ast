@@ -73,10 +73,11 @@ def _visit(
             fid = _unique(f"{prefix}.{child.name}", seen)
             node_ids[child] = fid
             kind = SymbolKind.METHOD if container == "class" else SymbolKind.FUNCTION
+            rtype, rtype_inferred = _return_type_of(child)
             out.append(
                 Symbol(fid, child.name, kind, span(path, child),
                        signature=_func_sig(child), doc=_docline(child), parent=prefix,
-                       return_type=_return_type_of(child))
+                       return_type=rtype, return_type_inferred=rtype_inferred)
             )
             _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, ast.Assign | ast.AnnAssign):
@@ -122,12 +123,14 @@ def _docline(
     return None
 
 
-def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
-    """A function's return type as a resolvable name: the annotation if present, else inferred
-    from the body — a single unambiguous ``return Ctor(...)`` names its class. Un-annotated
-    functions are common, and this feeds the same chaining/assignment resolution as annotations."""
+def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str | None, bool]:
+    """A function's return type as ``(resolvable name, from-body-inference?)``: the annotation
+    if present, else inferred from the body — a single unambiguous ``return Ctor(...)`` names its
+    class. Un-annotated functions are common, and this feeds the same chaining/assignment
+    resolution as annotations; the flag keeps the provenance honest (an edge built through an
+    inferred return must be stamped INFERENCE, not ANNOTATION)."""
     if fn.returns is not None:
-        return _annotation_name(fn.returns)
+        return _annotation_name(fn.returns), False
     ctors: set[str] = set()
     ambiguous = False
 
@@ -149,7 +152,9 @@ def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
 
     for stmt in fn.body:
         scan(stmt)
-    return next(iter(ctors)) if len(ctors) == 1 and not ambiguous else None
+    if len(ctors) == 1 and not ambiguous:
+        return next(iter(ctors)), True
+    return None, False
 
 
 def _annotation_name(node: ast.expr | None) -> str | None:

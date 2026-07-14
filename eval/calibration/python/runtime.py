@@ -119,6 +119,8 @@ class PythonRuntimeOracle(RuntimeOracle):
             related = related_classes(self._graph, class_of(dst)) if is_method else frozenset()
             if any(class_of(o) in related for o in same_leaf):
                 return Verdict.OVERRIDE
+            if is_method and self._implements_protocol(class_of(dst), same_leaf):
+                return Verdict.PROTOCOL
             return Verdict.SAME_NAME
         if self._is_untraceable(rec, dst):
             return Verdict.UNTRACEABLE
@@ -143,6 +145,24 @@ class PythonRuntimeOracle(RuntimeOracle):
                 else None
             )
         return self._forms[dst]
+
+    def _implements_protocol(self, proto_id: str, observed: list[str]) -> bool:
+        """The target's class is a ``typing.Protocol`` and an observed same-leaf callee's class
+        structurally implements it. Structural typing leaves no INHERITS edge, so protocol
+        dispatch (``stubs: StubProvider`` running ``StdlibStubs.type_member``) is invisible to
+        ``related_classes`` — this is the structural counterpart of the OVERRIDE bucket, checked
+        against the runtime objects (``__protocol_attrs__``), never by name."""
+        proto = resolve_object(proto_id, self._modules)
+        if not (isinstance(proto, type) and getattr(proto, "_is_protocol", False)):
+            return False
+        attrs = getattr(proto, "__protocol_attrs__", None)
+        if not attrs:
+            return False
+        for o in observed:
+            impl = resolve_object(class_of(o), self._modules)
+            if isinstance(impl, type) and all(hasattr(impl, a) for a in attrs):
+                return True
+        return False
 
     def _is_untraceable(self, rec: EdgeRecord, dst: str) -> bool:
         """Targets whose call CPython's ``setprofile`` structurally cannot report, so a

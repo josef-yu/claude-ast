@@ -84,14 +84,20 @@ def resolve_value_types(
                     ) if ref.receiver_type is not None
                     else None
                 )
+                # Source provenance: ANNOTATION only if every fact used was declared — a
+                # self/inferred receiver or a body-inferred return hop makes it INFERENCE.
+                inferred = r_root == "self" or ref.receiver_inferred
                 recv = _member_lookup(cls, r_member, members, bases) if cls else None
-                typ: SymbolId | None = returns.get(recv) if recv else None
+                typ, hop_inferred = returns.get(recv, (None, False)) if recv else (None, False)
+                inferred = inferred or hop_inferred
                 for name in ref.chain[:-1]:
                     hop = _member_lookup(typ, name, members, bases) if typ else None
-                    typ = returns.get(hop) if hop else None
+                    typ, hop_inferred = returns.get(hop, (None, False)) if hop else (None, False)
+                    inferred = inferred or hop_inferred
                 target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
                 if target is not None:
-                    out.append(Edge(ref.src, target, ref.kind, Resolution.annotated(), ref.at))
+                    res = Resolution.inferred() if inferred else Resolution.annotated()
+                    out.append(Edge(ref.src, target, ref.kind, res, ref.at))
                 continue
             if not ref.local_root:
                 continue
@@ -102,6 +108,7 @@ def resolve_value_types(
                 class_id = _self_class(ref.src, by_id)
                 resolution = Resolution.inferred()
             elif ref.receiver_type is not None:
+                ret_inferred = False
                 class_id = resolve_type_name(
                     ref.receiver_type, module_defs, fi.imports, all_ids, reexports, by_id
                 )
@@ -114,7 +121,7 @@ def resolve_value_types(
                         all_ids, internal_roots, reexports,
                     )
                     if callee is not None and not callee[1]:
-                        class_id = returns.get(callee[0])
+                        class_id, ret_inferred = returns.get(callee[0], (None, False))
                 if class_id is None:
                     # external receiver type -> consult stubs. Only a CALLABLE member resolves as
                     # a call (`p.exists()`); a property/data attribute (`p.name()`) is not callable.
@@ -129,7 +136,9 @@ def resolve_value_types(
                         out.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
                     continue
                 resolution = (
-                    Resolution.inferred() if ref.receiver_inferred else Resolution.annotated()
+                    Resolution.inferred()
+                    if ref.receiver_inferred or ret_inferred
+                    else Resolution.annotated()
                 )
             else:
                 # untyped receiver: last-resort name match, one LOW edge per candidate,
@@ -156,7 +165,8 @@ def resolve_intree_chains(
     """Call-return chains whose receiver returns an *in-tree* type: ``make().run()`` where
     ``make() -> Service`` -> ``Service.run`` (MEDIUM). The external counterpart lives in
     ``chains``; this one threads *in-tree* function return annotations through the same member
-    lookup the value resolvers use.
+    lookup the value resolvers use. The edge's source is honest provenance: ANNOTATION when
+    every return hop was declared, INFERENCE the moment any hop was body-inferred.
 
     Runs after syntactic binding, so INHERITS edges exist for the base walk. Only ``chain`` refs
     whose receiver binds to an in-tree function are handled — external receivers are resolved in
@@ -180,13 +190,15 @@ def resolve_intree_chains(
             recv = bind(ref.name, module_defs, fi.imports, all_ids, internal_roots, reexports)
             if recv is None or recv[1]:  # unresolved, or external (chains.py owns external)
                 continue
-            typ: SymbolId | None = returns.get(recv[0])
+            typ, inferred = returns.get(recv[0], (None, False))
             for name in ref.chain[:-1]:
                 member = _member_lookup(typ, name, members, bases) if typ else None
-                typ = returns.get(member) if member else None
+                typ, hop_inferred = returns.get(member, (None, False)) if member else (None, False)
+                inferred = inferred or hop_inferred
             target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
             if target is not None:
-                out.append(Edge(ref.src, target, ref.kind, Resolution.annotated(), ref.at))
+                res = Resolution.inferred() if inferred else Resolution.annotated()
+                out.append(Edge(ref.src, target, ref.kind, res, ref.at))
     return out
 
 
@@ -195,9 +207,14 @@ def _return_types(
     reexports: dict[str, dict[str, str]],
     by_id: dict[SymbolId, Symbol],
     all_ids: set[SymbolId],
-) -> dict[SymbolId, SymbolId]:
-    """function/method id -> the in-tree CLASS id its return annotation names, when resolvable."""
-    returns: dict[SymbolId, SymbolId] = {}
+) -> dict[SymbolId, tuple[SymbolId, bool]]:
+    """function/method id -> ``(the in-tree CLASS id its return type names, from-body-inference?)``.
+
+    The flag is the return type's provenance (declared annotation vs body-inferred), carried so
+    a chain edge threaded through it can be stamped with an honest source — ANNOTATION only when
+    every fact used was declared.
+    """
+    returns: dict[SymbolId, tuple[SymbolId, bool]] = {}
     for fi in files:
         module_defs: dict[str, str] = {}
         for s in fi.symbols:
@@ -210,7 +227,7 @@ def _return_types(
                 sym.return_type, module_defs, fi.imports, all_ids, reexports, by_id
             )
             if cls is not None:
-                returns[sym.id] = cls
+                returns[sym.id] = (cls, sym.return_type_inferred)
     return returns
 
 

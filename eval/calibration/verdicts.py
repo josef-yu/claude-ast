@@ -30,6 +30,9 @@ class Verdict(StrEnum):
     EXACT = "exact"                # the exact claimed target ran
     CONSTRUCTION = "construction"  # target is a class; its constructor ran (Foo() -> Foo.__init__)
     OVERRIDE = "override"          # a same-named member on a related class ran (override dispatch)
+    PROTOCOL = "protocol"          # a same-named member ran on a class that structurally
+    #                                implements the target's protocol/interface — dispatch that
+    #                                nominal (INHERITS) kinship can't see; same story as OVERRIDE
     SAME_NAME = "same-name"        # a same-named member on an *unrelated* class ran (weak)
     UNTRACEABLE = "untraceable"    # the site ran but the target's kind is one the tracer can't see
     CONTRADICTED = "contradicted"  # the site ran with callees, none matching the target or its name

@@ -25,7 +25,7 @@ from .edges import EdgeRecord
 from .verdicts import StaticVerdict, Verdict
 
 _CONFIRM = (Verdict.EXACT, Verdict.CONSTRUCTION)
-_FAMILY = (Verdict.EXACT, Verdict.CONSTRUCTION, Verdict.OVERRIDE)
+_FAMILY = (Verdict.EXACT, Verdict.CONSTRUCTION, Verdict.OVERRIDE, Verdict.PROTOCOL)
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,9 +158,10 @@ def format_report(
         "## Runtime dispatch precision (CALL edges executed by the test suite)",
         "",
         "Strict = exact target or its constructor ran. Family = strict + dispatch to a sub/"
-        "superclass override. Contra = the site ran, produced callees, but the named member "
-        "(or its family) never did. *Untr* (untraceable) sites — a builtin-type or enum call "
-        "the tracer can't observe — are excluded from the precision denominator (*trace*).",
+        "superclass override or a structural (protocol/interface) implementor. Contra = the site "
+        "ran, produced callees, but the named member (or its family) never did. *Untr* "
+        "(untraceable) sites — a builtin-type or enum call the tracer can't observe — are "
+        "excluded from the precision denominator (*trace*).",
         "",
         "| group | edges | exec | trace | strict | family | contra | untr |",
         "|---|--:|--:|--:|--:|--:|--:|--:|",

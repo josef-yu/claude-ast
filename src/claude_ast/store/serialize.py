@@ -55,6 +55,8 @@ def _symbol_d(s: Symbol) -> dict[str, object]:
     }
     if s.return_type is not None:
         d["rt"] = s.return_type
+        if s.return_type_inferred:
+            d["rti"] = 1  # provenance flag — a warm rebuild must relabel edges identically
     return d
 
 
@@ -68,6 +70,7 @@ def _symbol(v: dict) -> Symbol:
         doc=v["d"],
         parent=v["pa"],
         return_type=v.get("rt"),
+        return_type_inferred=bool(v.get("rti")),
     )
 
 

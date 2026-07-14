@@ -193,6 +193,57 @@ def test_value_rooted_chain_self_receiver(tmp_path) -> None:
     assert {"m.App.svc", "m.Service.make", "m.Inner.run"} <= deps
 
 
+def _source_of(index: Index, src: str, dst: str) -> str:
+    return next(e.resolution.source.value for e in index.graph.out_edges(src) if e.dst == dst)
+
+
+def test_chain_source_is_annotation_only_when_every_fact_is_declared(tmp_path) -> None:
+    # Per-source calibration depends on honest attribution: a chain threaded purely through
+    # declared annotations is ANNOTATION; any inferred fact in the chain makes it INFERENCE.
+    (tmp_path / "m.py").write_text(_INTREE + "def f():\n    return make().inner()\n")
+    index = Index.build(tmp_path, use_store=False)
+    assert _source_of(index, "m.f", "m.Service.inner") == "annotation"
+
+
+def test_chain_through_a_body_inferred_return_is_inference(tmp_path) -> None:
+    # `def make(): return Service()` — the return type is inferred, so the chained edge
+    # must not launder body inference into the ANNOTATION bucket.
+    src = _INTREE.replace("def make() -> Service:", "def make():")
+    (tmp_path / "m.py").write_text(src + "def f():\n    return make().inner()\n")
+    index = Index.build(tmp_path, use_store=False)
+    assert _source_of(index, "m.f", "m.Service.inner") == "inference"
+
+
+def test_self_rooted_chain_is_inference(tmp_path) -> None:
+    # self's type is known by inference (the enclosing class), not by an annotation.
+    (tmp_path / "m.py").write_text(
+        "class Inner:\n    def run(self): return 1\n\n\n"
+        "class App:\n    def svc(self) -> Inner: return Inner()\n"
+        "    def use(self):\n        return self.svc().run()\n"
+    )
+    index = Index.build(tmp_path, use_store=False)
+    assert _source_of(index, "m.App.use", "m.Inner.run") == "inference"
+
+
+def test_assignment_receiver_through_inferred_return_is_inference(tmp_path) -> None:
+    # s = make(); s.inner() with an unannotated make: both the receiver typing and the
+    # return type are inference — the edge must say so.
+    src = _INTREE.replace("def make() -> Service:", "def make():")
+    (tmp_path / "m.py").write_text(src + "def f():\n    s = make()\n    return s.inner()\n")
+    index = Index.build(tmp_path, use_store=False)
+    assert _source_of(index, "m.f", "m.Service.inner") == "inference"
+
+
+def test_inferred_chain_source_survives_a_warm_rebuild(tmp_path, monkeypatch) -> None:
+    # return_type_inferred must round-trip, else a warm rebuild relabels INFERENCE as ANNOTATION.
+    src = _INTREE.replace("def make() -> Service:", "def make():")
+    (tmp_path / "m.py").write_text(src + "def f():\n    return make().inner()\n")
+    monkeypatch.setenv("CLAUDE_AST_CACHE_DIR", str(tmp_path / "cache"))
+    cold = _source_of(Index.build(tmp_path), "m.f", "m.Service.inner")
+    warm = _source_of(Index.build(tmp_path), "m.f", "m.Service.inner")
+    assert cold == warm == "inference"
+
+
 def test_intree_chain_survives_a_warm_rebuild(tmp_path, monkeypatch) -> None:
     # Symbol.return_type must round-trip, else warm rebuild loses the in-tree chain edge.
     (tmp_path / "m.py").write_text(_INTREE + "def f():\n    return make().inner()\n")

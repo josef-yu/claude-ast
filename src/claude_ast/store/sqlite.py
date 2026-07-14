@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 16  # Symbol.return_type: in-tree call-return chaining — products changed
+_SCHEMA_VERSION = 17  # Symbol.return_type_inferred: honest chain-edge source provenance
 
 
 class SqliteStore(Store):

@@ -172,6 +172,9 @@ class Symbol:
     # ``models.User``, or a string forward-ref) — the fact that lets call-return chaining type
     # ``make().run()`` in-tree. ``None`` when absent or not a plain name (subscript/union deferred).
     return_type: str | None = None
+    # True when ``return_type`` was inferred from the body (``return Ctor()``), not declared.
+    # Provenance, so an edge built through it is stamped INFERENCE, never ANNOTATION.
+    return_type_inferred: bool = False
 
 
 @dataclass(slots=True)
