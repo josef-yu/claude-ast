@@ -338,3 +338,81 @@ string the tracer builds. Result: definite **74% → 96%**, contradicted **19% �
 - **`mro` coverage is partial** without full app setup; `stub`/external dispatch is only partly traceable (C
   methods report under impl names).
 - **8 "candidates" ≠ 8 bugs** — 3 are environment artifacts, 5 are the one `sys.stdout.getvalue`-shaped issue.
+
+---
+
+# Eval results — v5 (does the typeshed Tier-2 work pay off?)
+
+**Verdict: yes — the Tier-2 arc grew honest coverage ~45%, the new edges are well-calibrated (stub 95% dispatch
+on src), the calibration curve stayed monotone, and it added zero false-definites.** This is the loop v4 opened:
+v4 measured the tool and surfaced #2; the fix ballooned into a full typeshed type-resolution layer (external chains,
+in-tree chains, assignment inference, `Self`-covariance, property-kind); v5 re-measures the same tool to see whether
+all that new resolution *earned its keep* — and whether it stayed honest.
+
+## What changed since v4
+
+Between v4 and v5 the resolver gained: external module-rooted chain resolution (the #2 fix — `sys.stdout.getvalue`
+declines, `os.path.join` stays definite), arbitrary-depth call-return chaining (`re.compile(p).match(s).group()`),
+typeshed member/return tables (full stdlib, ~1,187 classes), in-tree call-return chaining + assignment inference
+(`make().run()`, `s = make(); s.inner()`), covariant `Self`, property-kind detection, and the retirement of the
+old 24-type stub table for the full-stdlib typeshed table.
+
+## The result (claude-ast's own src, full runtime coverage)
+
+| metric | v4 | v5 |
+|---|--:|--:|
+| **possible-tier edges** | 71 | **103** (+45%) |
+| &nbsp;&nbsp;— stub | 29 | 46 |
+| &nbsp;&nbsp;— annotation | 22 | 34 |
+| &nbsp;&nbsp;— inference | 10 | 13 |
+| definite edges | 449 | 486 |
+| possible ÷ resolved | 16% | **21%** |
+| calibration curve (strict, high/med/low) | 98 / 84 / 50 | **99 / 85 / 50** |
+| candidate false-definites | 0 | **0** |
+
+Runtime dispatch by source (v5, src): `stub` **95%** strict (37 traceable), `inference` 100% (8), `annotation`
+69% (29), `heuristic` 50% / 90% family (10). Static audit: **100% confirmed on every check**, new possible edges
+included (external-possible 23/23, existence-possible 57/57, builtin-possible 23/23).
+
+## Reading it
+
+- **Honest coverage grew, and it's the *right* tier.** The +32 possible edges are stub/chain/return resolutions —
+  member calls and chains that v4 simply dropped. The share of resolved edges landing in the hedged `possible`
+  tiers rose 16% → 21% (controlling for the ~7% code growth). The tool now *says more*, at the honesty tier where
+  saying-more is safe.
+- **The new edges dispatch where they claim.** The headline is `stub` at **95% strict** — the new external
+  member/chain edges genuinely go to the named target 95% of the time they run. Combined with the static audit's
+  100% confirmation, the new MEDIUM edges are real *and* calibrated.
+- **Honesty held.** The curve is still monotone (99 > 85 > 50), and there are still **zero false-definites** — the
+  #2 fix, the chaining, and the in-tree typing added no false facts. "Report, don't rule" survived a large increase
+  in what the tool reports.
+
+## Django (static confirms it at scale; runtime is a thin floor)
+
+Statically, all of it holds on Django: **#2 stays fixed** (candidates 8 → 3, the remaining three are `WinDLL`/
+`uuid7` platform/version env artifacts, not bugs), and **stub edges grew 690 → 1,222** (+532) — the value-attribute
+over-resolutions downgraded from false-definite to honest MEDIUM, plus new chain edges. Definite dropped 63,086 →
+62,535 (the downgrades), possible rose 40,830 → 41,428.
+
+The Django *runtime* trace (the `dispatch` app, with `asgiref`/`sqlparse`/`tzdata` via `uv run --with`) confirms
+**definite ≈ 97% strict, #2 fixed**, but says little about the *new* edges: only **25 of 1,222 stub edges (2%)**
+were exercised, and those trace at **52%** — a thin, C-method-attribution-limited floor (Django's stub edges skew to
+builtin `str`/`dict` methods the tracer reports under impl names), not a calibration verdict. The static audit
+confirms 100% of them regardless. So **src's 95% is the clean signal; Django's 52% is a coverage floor** — a
+stdlib-heavy multi-app Django run would be needed for a solid Django stub sample, but src already answers it.
+
+## Synthesis (v4 → v5)
+
+v4 asked *"are the tiers honest?"* and found yes, but the tool answered a narrow slice. v5 asks *"did widening the
+slice keep it honest?"* — and it did: **~45% more honest coverage, 95%-calibrated new edges, monotone curve, zero
+false-definites.** The typeshed Tier-2 investment paid off exactly where it should — it made the tool *report more*
+without making it *lie more*.
+
+## Caveats
+
+- **Code-growth confound.** src grew ~7% between v4 and v5 (new modules), so raw edge counts overstate slightly;
+  the `possible ÷ resolved` ratio (16% → 21%) controls for it and is the fairer read.
+- **Small runtime samples.** `stub`/`inference`/`annotation` on src are 37/8/29 traceable edges — directional, not
+  tight. The static audit (100%, large-N) is the load-bearing correctness check.
+- **Django runtime is a floor**, not a verdict, for the new edges (2% stub coverage, C-method attribution); its
+  runtime driver also needs `asgiref`/`sqlparse`/`tzdata`, currently supplied via `uv run --with` (not in the lock).
