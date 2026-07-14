@@ -168,3 +168,173 @@ displacing the git-history/behavior/test work that dominates.
 positives). Narrow on Django (clean, distinctive naming); it would widen on messier codebases. The honest
 takeaway isn't "the tool is bad" — it's "for an LLM agent on a well-named codebase, the tool buys *effort*, not
 *capability*, and only in its niche."
+
+---
+
+# Eval results — v4 (confidence-tier calibration: a mechanics benchmark, no agents)
+
+**Verdict: the tiers are calibrated and honest.** `definite` edges are ~100% correct (98% of the executed
+ones dispatch exactly where claimed; the 2% gap is entirely CPython tracer blind spots, each independently
+confirmed — **zero real false-definites**), and strict dispatch precision falls **monotonically** as confidence
+drops. "Report, don't rule" is not just a design slogan — it holds empirically. This is the open thread the
+v1+v2 synthesis flagged ("confidence calibration… untested (tasks were binary)"), now closed.
+
+## What's different from v1–v3
+
+The first eval with **no LLM agents**. v1–v3 measured agent *task outcomes* (does claude-ast help vs grep);
+this measures the resolver's *own output* against ground truth. So the result is a property of the tool, not
+of a model + judge. Subject = **claude-ast's own `src/`** (dogfood, self-contained, reproducible). Harness +
+method in [`calibration/`](calibration/); run with `uv run python eval/calibration/run.py`.
+
+## Two oracles (both sound)
+
+- **Runtime dispatch trace** — the driver (the test suite + a direct indexing pass) runs under `sys.setprofile`;
+  each CALL edge is judged against what *actually dispatched* at its site. Sound but partial (an unexercised
+  site is no-evidence, never a miss). This is the calibration curve.
+- **Static decidable audit** — over *every* edge, verify the decidable claims independently of the resolver
+  (import → a real `.py`; inheritance → the runtime `__mro__`; builtins/externals → they import). Catches a
+  false-definite even in code no test runs.
+
+Reconciled: a definite edge is a candidate bug only if runtime *contradicted* it **and** static did not
+*confirm* it.
+
+## The calibration curve (dispatch precision by confidence level)
+
+| confidence | tier | CALL edges | traceable | strict | family |
+|---|---|--:|--:|--:|--:|
+| **high** | definite | 449 | 280 | **98%** | 98% |
+| **medium** | possible | 61 | 50 | **84%** | 84% |
+| **low** | possible | 10 | 10 | **50%** | 90% |
+
+Strict = the exact target (or its constructor) ran; family = strict + dispatch to a sub/superclass override.
+Monotone 98 → 84 → 50: **higher confidence really does mean higher precision.** The `low` name-match tier is
+the story it was built for — only 50% of its guesses hit the exact leaf, but **90% land in the right
+inheritance family** (40% are an override of the named member), and 0% are contradicted.
+
+## By resolution source (the possible tier, unpacked)
+
+| source | tier | edges | traceable | strict | family |
+|---|---|--:|--:|--:|--:|
+| syntactic | definite | 449 | 280 | 98% | 98% |
+| inference (`x = Foo()`) | possible | 10 | 7 | 100% | 100% |
+| annotation (`u: User`) | possible | 22 | 21 | 95% | 95% |
+| stub (external `.pyi`) | possible | 29 | 22 | 68% | 68% |
+| heuristic (name-match) | possible | 10 | 10 | 50% | 90% |
+
+## Static audit — the honesty net
+
+Independently, over all 606 decidable edges: **100% confirmed, 0 refuted** — imports (76) resolve to real
+files, inheritance (8) holds under the MRO, builtins (195) and externals (77) all import, and every in-tree
+call/reference target (248) is a real symbol. No definite edge that both oracles could reach was contradicted.
+
+## The one subtlety that mattered (why the numbers are trustworthy)
+
+A naive runtime oracle reported definite precision at **82%** — because it mislabeled two things as
+contradictions that are not: (1) calling a class dispatches to `__init__` (a dataclass's is a generated
+`__create_fn__`), and (2) CPython's `setprofile` fires *no event* for calling a builtin type (`str()`,
+`tuple()`) and routes Enum calls through `EnumType.__call__`. Handling construction, `c_call`, and marking the
+structurally-invisible kinds `untraceable` (excluded from the denominator, not scored as misses) lifted it to
+**98% with zero real false-definites**. The remaining 3 runtime "contradictions" are all C-extension re-export
+naming (`hashlib.sha256` → `_hashlib.openssl_sha256`), each confirmed real by the static audit. Distinguishing
+*no evidence* from *counter-evidence* is the whole discipline of a calibration benchmark.
+
+## Caveats
+
+- **One well-typed codebase.** claude-ast's own src has few `low`/`stub` edges (N=10 heuristic), so those rows
+  are directional, not tight. A messier, less-typed codebase would populate them.
+- **Runtime coverage is 67% of definite CALL edges** (300/449 executed). The unexercised remainder leans on the
+  static audit, whose in-tree-*call* check is only an *existence* bar (the target is a real symbol) — weaker
+  than the dispatch or import/mro/builtin checks. So "zero false-definites" is strongest for the ~355 edges
+  with a strong independent check; honest, but not a proof over every single edge.
+- **`stub`/external dispatch is only partially traceable** (C methods report under impl names), so its 68% is a
+  floor, not a verdict on the stub resolver.
+
+## Synthesis with v1–v3
+
+The agent evals said *the tool buys effort, not capability, and only for ambiguous names.* This one says
+something orthogonal and load-bearing: *when the tool does answer, its confidence labels are honest* — a
+`definite` you can build on, a `possible` that is genuinely, measurably less sure. That honesty is the whole
+premise of "report, don't rule" for a dynamic language, and it is the first thing an LLM consumer needs to
+trust the `min_confidence` dial.
+
+---
+
+# Eval results — v4 · Django at scale (same harness, real large codebase) — *interim*
+
+**Verdict (so far): the honesty holds at 122k edges.** The static audit confirms `definite` ≈ 100% across all of
+Django; the runtime dispatch trace (one test app) reads **96% strict** after a fix, monotone `high 96% > medium
+84% > low 17%`. Zero real false-definites among executed edges. The new signals at scale: the `low` name-match
+tier honestly *collapses* to 17% on a big dynamic codebase, and the run surfaced one genuine over-resolution.
+
+## Setup
+
+Same harness as v4, pointed at a foreign project: `run.py python /path/to/django`. Subject = the Django **repo
+root** (6.2.dev), **122,822 edges** indexed. Runtime driver = Django's *own* test runner, in-process under
+`sys.setprofile` with no Django-specific harness code: `--driver script --target tests/runtests.py --argv
+"--settings=test_sqlite --parallel=1 dispatch"` (21 tests, **5,721 call sites**). Static audit runs over every
+edge. Django's runtime deps (`asgiref`/`sqlparse`/`tzdata`) were installed into the venv. Two general driver
+bugs were fixed to get here: `runpy.run_path` doesn't add the script's dir to `sys.path` like `python <script>`
+does (so `--settings=test_sqlite` wasn't importable), and a driver that raises now degrades to a partial trace
+instead of aborting.
+
+*"So far":* the runtime trace is **one small test app** — it exercises 1,621 of 63,086 definite edges (2.6%).
+The runtime curve is a slice; the static audit is the whole-codebase picture. Broader apps would widen it.
+
+## Calibration curve (dispatch precision by confidence level)
+
+| confidence | tier | edges | traceable | strict | family |
+|---|---|--:|--:|--:|--:|
+| **high** | definite | 63,086 | 1,621 | **96%** | 96% |
+| **medium** | possible | 21,783 | 197 | 84% | 88% |
+| **low** | possible | 19,047 | 1,181 | **17%** | 27% |
+
+By source (possible unpacked): `inference` 85% strict, `stub` 64%, `heuristic` **17% / 27% family**.
+
+## Static decidable audit (all 122k edges, independent of the resolver)
+
+| check | tier | edges | confirmed | refuted | precision |
+|---|---|--:|--:|--:|--:|
+| existence | definite | 36,484 | 36,484 | 0 | 100% |
+| builtin | definite | 16,584 | 16,584 | 0 | 100% |
+| import | definite | 10,027 | 10,027 | 0 | 100% |
+| external | definite | 10,053 | 9,811 | 8 | 100% |
+| mro | definite | 8,844 | 2,823 | 0 | 100% |
+
+`mro` is mostly *skipped* (6,021 of 8,844) — Django model classes need `django.setup()`'s app registry to import,
+so the runtime-MRO check declines rather than guesses. Honest skip, not a pass.
+
+## The 74% → 96% fix (a measure-first debugging note worth keeping)
+
+The runtime definite number *first* read **74% strict / 19% "contradicted"**, alarmingly unlike claude-ast's 98%.
+A diagnostic bucketing of the 309 contradicted-but-static-confirmed edges killed two wrong hypotheses before any
+code changed: multi-line call attribution (**measured false** — `setprofile`'s caller line is exactly the AST
+callee line) and module-aliasing `os.path`→`posixpath` (only 4/309). The real cause was **287/309 (93%): module
+names bound to factory/wrapper-produced callables** — `gettext_lazy = lazy(...)`, whose runtime *code* qualname is
+its definition site `lazy.<locals>.__wrapper__` (which `functools.wraps` can't change, since the tracer reads
+`frame.f_code.co_qualname`, not the object's `__qualname__`). The fix matches by **object identity**: resolve the
+edge's target to its runtime object and compare `__globals__['__name__'] + '.' + __code__.co_qualname` — the exact
+string the tracer builds. Result: definite **74% → 96%**, contradicted **19% → 2%**, blind-spots **309 → 32**
+(residual = genuine C-level callees with no Python code object to match). Self-run rose too (98→99, med 84→98).
+
+## Findings
+
+- **Static honesty holds at scale.** Every decidable definite check is 100% — imports resolve to real files,
+  inheritance holds under the MRO, builtins/externals import. The 96% runtime number is a floor that the
+  independent static audit corroborates upward, not inflation.
+- **The `low` tier collapses to 17%** (vs 50% on claude-ast) — exactly what the weakest, name-match tier *should*
+  do on a large dynamic codebase saturated with same-named methods (`save`/`get`/`render`). `inference` stays
+  strong (85%). This is the calibration story working: the tiers separate more, not less, at scale.
+- **One genuine over-resolution surfaced** (5 of 8 candidate false-definites): `sys.stdout.getvalue` recorded as
+  a *definite* external edge through a **value** attribute (`sys.stdout` is a `TextIO`, not a submodule, so
+  `getvalue`'s existence is type-dependent). It folds into the deferred typeshed-Tier-2 stub item (add a
+  module-vs-value "shape" dimension + an external analog of the internal-root-defer rule at `binding._classify`).
+  The other 3 candidates (`ctypes.WinDLL`, `uuid.uuid7`) are platform/version env artifacts of auditing on
+  macOS/py3.13 — not tool defects.
+
+## Caveats
+
+- **Runtime = one test app.** 2.6% of definite edges exercised; the curve is directional, the static audit is the
+  whole. A multi-app run is the obvious next step.
+- **`mro` coverage is partial** without full app setup; `stub`/external dispatch is only partly traceable (C
+  methods report under impl names).
+- **8 "candidates" ≠ 8 bugs** — 3 are environment artifacts, 5 are the one `sys.stdout.getvalue`-shaped issue.
