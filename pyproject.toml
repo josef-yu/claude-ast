@@ -20,6 +20,9 @@ dev = [
     "pytest>=8",
     "ruff>=0.6",
     "pyright>=1.1",
+    # Generation-time only: tools/python/gen_typeshed.py reads typeshed to build the frozen
+    # stub tables. The engine never imports it — it consults the committed frozen literals.
+    "typeshed-client>=2.12",
 ]
 
 [build-system]
@@ -40,8 +43,9 @@ extend-exclude = ["tests/fixtures"]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
-# Generated frozen stub table (tools/gen_stubs.py): dense one-line frozenset literals.
+# Generated frozen stub tables: dense one-line literals, not hand-edited.
 "src/claude_ast/ingest/python/_stub_table.py" = ["E501"]
+"src/claude_ast/ingest/python/_typeshed_table.py" = ["E501"]
 
 [tool.pyright]
 include = ["src", "tests"]
