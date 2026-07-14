@@ -43,7 +43,7 @@ _OUT = _ROOT / "src" / "claude_ast" / "ingest" / "python" / "_typeshed_table.py"
 
 SUPPORTED_VERSIONS: tuple[tuple[int, int], ...] = ((3, 12), (3, 13), (3, 14))
 PLATFORM = "linux"  # platform-specific modules (winreg/fcntl/…) are a documented follow-up
-GENERATOR_VERSION = 2  # bumped: `Self` returns now emit the SELF sentinel (covariant resolution)
+GENERATOR_VERSION = 3  # bumped: `@property`/`@cached_property` accessors now emit kind `property`
 
 
 def spec_fingerprint() -> str:
@@ -148,7 +148,8 @@ class Extractor:
                     for f in node.definitions if isinstance(f, ast.FunctionDef)}
             return ("method" if owner else "func", rets.pop() if len(rets) == 1 else OPAQUE)
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            return ("method" if owner else "func", self.normalize(node.returns, module, owner))
+            kind = "property" if _is_property(node) else ("method" if owner else "func")
+            return (kind, self.normalize(node.returns, module, owner))
         if isinstance(node, ast.ClassDef):
             cls_q = f"{module}.{info.name}"
             self.ensure_class(cls_q, module, node)
@@ -212,6 +213,16 @@ class Extractor:
             if r is not None:
                 table[name] = r
         self.modules[module] = table
+
+
+def _is_property(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """A ``@property`` / ``@cached_property`` accessor — a value, not a callable member, so a call
+    on it (``p.name()``) must decline while a chain *access* of it threads its return type."""
+    for deco in node.decorator_list:
+        leaf = deco.attr if isinstance(deco, ast.Attribute) else getattr(deco, "id", None)
+        if leaf in ("property", "cached_property"):
+            return True
+    return False
 
 
 def _dotted(node: ast.expr) -> str | None:

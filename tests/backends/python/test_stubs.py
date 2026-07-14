@@ -66,6 +66,16 @@ def test_unknown_member_declines(tmp_path):
     assert _external_deps(index, "m.f") == set()
 
 
+def test_property_call_declines(tmp_path):
+    # `Path.name` is a @property, not a callable method -> `p.name()` (calling it) declines,
+    # even though `name` is in the table (the value resolver is callable-only).
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef f(p: Path):\n    return p.name()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _external_deps(index, "m.f") == set()
+
+
 def test_an_in_tree_type_shadows_a_stdlib_stub(tmp_path):
     # A local class named `Path` is in-tree -> resolves there, never to the stdlib stub.
     (tmp_path / "m.py").write_text(

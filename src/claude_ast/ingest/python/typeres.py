@@ -116,12 +116,14 @@ def resolve_value_types(
                     if callee is not None and not callee[1]:
                         class_id = returns.get(callee[0])
                 if class_id is None:
-                    # external receiver type -> consult stubs for member existence off-tree
+                    # external receiver type -> consult stubs. Only a CALLABLE member resolves as
+                    # a call (`p.exists()`); a property/data attribute (`p.name()`) is not callable.
                     ext = resolve_external_type_name(
                         ref.receiver_type, module_defs, fi.imports,
                         all_ids, internal_roots, reexports,
                     )
-                    if ext is not None and stubs.type_member(ext, attr) is not None:
+                    member = stubs.type_member(ext, attr) if ext is not None else None
+                    if member is not None and member[0] in ("method", "func", "class"):
                         member_id = f"{ext}.{attr}"
                         externals.append(external_symbol(member_id))
                         out.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))

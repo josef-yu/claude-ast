@@ -8,7 +8,7 @@ The authoritative freshness check is ``tools/python/gen_typeshed.py check`` (reg
 
 from claude_ast.ingest.python import _typeshed_table as t
 
-_KINDS = {"value", "func", "class", "submodule", "method"}
+_KINDS = {"value", "func", "class", "submodule", "method", "property"}
 
 
 def test_canonical_entries_resolve_finding_2() -> None:
