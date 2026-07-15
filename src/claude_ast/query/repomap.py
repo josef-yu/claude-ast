@@ -28,8 +28,12 @@ _NO_FOCUS_CACHE: WeakKeyDictionary[Graph, _NoFocus] = WeakKeyDictionary()
 
 
 def _ranked_candidates(graph: Graph, focus: str | None) -> _NoFocus:
-    """The ranks and rank-sorted structural candidates, memoized for the focus=None hot path."""
-    if focus is not None:
+    """The ranks and rank-sorted structural candidates, memoized for the no-focus hot path.
+
+    Gated on ``if focus`` (truthiness), matching ``_teleport``: a falsy focus (``None`` *or* an
+    empty string) yields the uniform no-focus teleport, so both share the one memoized entry
+    rather than re-running the full PageRank + sort on every call."""
+    if focus:
         return _rank_and_sort(graph, focus)
     cached = _NO_FOCUS_CACHE.get(graph)
     if cached is None:
