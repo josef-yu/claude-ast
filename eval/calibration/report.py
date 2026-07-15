@@ -95,6 +95,36 @@ def static_row(label: str, verdicts: Sequence[StaticVerdict]) -> StaticRow:
     )
 
 
+def reconcile(
+    call_edges: Sequence[EdgeRecord],
+    call_verdicts: Sequence[Verdict],
+    all_edges: Sequence[EdgeRecord],
+    static_verdicts: Sequence[tuple[StaticVerdict, str]],
+) -> tuple[int, list[tuple[EdgeRecord, str]]]:
+    """The two oracles, reconciled over the definite tier: ``(blind_spots, candidates)``.
+
+    A definite edge is a *candidate false-definite* only when both oracles fail it — runtime
+    contradicted it AND the static audit did not confirm it, or the static audit outright
+    refuted it. A runtime contradiction the static audit confirms is a tracer *blind spot*
+    (a C-level callee with no Python code object), counted but never a candidate. This is the
+    single definition the report renders and the CI gate enforces.
+    """
+    static_by_edge = {rec: v for rec, (v, _) in zip(all_edges, static_verdicts, strict=True)}
+    candidates: list[tuple[EdgeRecord, str]] = []
+    blind_spots = 0
+    for rec, v in zip(call_edges, call_verdicts, strict=True):
+        if rec.tier != "definite" or v is not Verdict.CONTRADICTED:
+            continue
+        if static_by_edge.get(rec) is StaticVerdict.CONFIRMED:
+            blind_spots += 1  # tracer can't see it, but it's provably real
+        else:
+            candidates.append((rec, f"runtime-contradicted, static={static_by_edge.get(rec)}"))
+    for rec, (v, method) in zip(all_edges, static_verdicts, strict=True):
+        if rec.tier == "definite" and v is StaticVerdict.REFUTED:
+            candidates.append((rec, f"static-refuted ({method})"))
+    return blind_spots, candidates
+
+
 def _pct(x: float | None) -> str:
     return "—" if x is None else f"{x * 100:.0f}%"
 
@@ -117,7 +147,6 @@ def format_report(
     static_verdicts: Sequence[tuple[StaticVerdict, str]],
 ) -> str:
     """Render the full calibration report as markdown."""
-    static_by_edge = {rec: v for rec, (v, _) in zip(all_edges, static_verdicts, strict=True)}
     lines: list[str] = ["# Confidence-tier calibration (mechanics benchmark, no agents)", ""]
 
     # --- headline: the calibration curve by confidence level (the axis being calibrated) ---
@@ -194,18 +223,7 @@ def format_report(
     lines.append("")
 
     # --- reconciliation: a candidate false-definite fails BOTH oracles ---
-    candidates: list[tuple[EdgeRecord, str]] = []
-    blind_spot = 0
-    for rec, v in zip(call_edges, call_verdicts, strict=True):
-        if rec.tier != "definite" or v is not Verdict.CONTRADICTED:
-            continue
-        if static_by_edge.get(rec) is StaticVerdict.CONFIRMED:
-            blind_spot += 1  # tracer can't see it, but it's provably real
-        else:
-            candidates.append((rec, f"runtime-contradicted, static={static_by_edge.get(rec)}"))
-    for rec, (v, method) in zip(all_edges, static_verdicts, strict=True):
-        if rec.tier == "definite" and v is StaticVerdict.REFUTED:
-            candidates.append((rec, f"static-refuted ({method})"))
+    blind_spot, candidates = reconcile(call_edges, call_verdicts, all_edges, static_verdicts)
 
     lines += ["## Candidate false-definites (definite edges *both* oracles fail)", ""]
     if blind_spot:

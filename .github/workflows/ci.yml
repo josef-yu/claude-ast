@@ -1,0 +1,22 @@
+# The project's quality bar: the three CLAUDE.md checks, the frozen-table freshness gate,
+# and the calibration gate (eval/calibration/gate.py) — the honesty floor v4–v6 measured,
+# enforced on every change so a resolver regression is caught by the harness that defined it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run pytest
+      - run: uv run ruff check
+      - run: uv run pyright
+      - run: uv run --with typeshed-client python tools/python/gen_typeshed.py check
+      - run: uv run python eval/calibration/gate.py

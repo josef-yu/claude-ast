@@ -124,5 +124,19 @@ and the static audit still runs.
 
 Deterministic (no sampling, no model) — the numbers reproduce run to run. Layout: `edges.py`
 (neutral edge model + graph helpers), `verdicts.py` (neutral vocabulary + oracle protocols),
-`report.py` (neutral aggregation), `run.py` (neutral dispatcher); `python/` holds the backend —
+`report.py` (neutral aggregation + the reconcile definition), `trace.py` (cross-run observation
+maps), `run.py` (neutral dispatcher), `gate.py` (the CI gate); `python/` holds the backend —
 `cli.py` (the `python` subcommand + its args), the runtime/static oracles, `ids.py`, `driver.py`.
+
+## The CI gate
+
+```sh
+uv run python eval/calibration/gate.py
+```
+
+Re-runs the self-calibration and fails on any honesty regression, with floors set well under the
+measured stable state (v5/v6): definite strict ≥ 95% (measured 99%), medium strict ≥ 70%
+(measured 85%), zero static refutations, zero candidate false-definites — plus a driver-sanity
+floor (≥ 200 traced definite sites), because an unexercised edge is never a miss and a broken
+driver would otherwise pass vacuously. A separate CI step, not a pytest test: the driver *runs
+the test suite* under the tracer, and a gate inside the suite would recurse.
