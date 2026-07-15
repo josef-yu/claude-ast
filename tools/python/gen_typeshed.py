@@ -16,9 +16,13 @@ INTERSECTED across the supported matrix, so no in-range project ever gets a fals
 Conservatism is the invariant: a mis-read must degrade to OPAQUE/absent (a miss), never to a
 confident wrong type (a false edge). Anything not understood -> OPAQUE. Usage::
 
-    uv run --with typeshed-client python tools/python/gen_typeshed.py stats     # coverage report
-    uv run --with typeshed-client python tools/python/gen_typeshed.py generate  # write the table
-    uv run --with typeshed-client python tools/python/gen_typeshed.py check      # CI freshness gate
+    uv run python tools/python/gen_typeshed.py stats     # coverage report
+    uv run python tools/python/gen_typeshed.py generate  # write the table
+    uv run python tools/python/gen_typeshed.py check     # CI freshness gate
+
+(``typeshed-client`` is a locked dev dependency — plain ``uv run`` uses the pinned version, so
+the table regenerates identically everywhere; an unpinned ``--with typeshed-client`` overlay
+could drift to a newer bundled typeshed.)
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ _OUT = _ROOT / "src" / "claude_ast" / "ingest" / "python" / "_typeshed_table.py"
 
 SUPPORTED_VERSIONS: tuple[tuple[int, int], ...] = ((3, 12), (3, 13), (3, 14))
 PLATFORM = "linux"  # platform-specific modules (winreg/fcntl/…) are a documented follow-up
-GENERATOR_VERSION = 3  # bumped: `@property`/`@cached_property` accessors now emit kind `property`
+GENERATOR_VERSION = 4  # bumped: case-exact stub lookup — no phantom modules on macOS/Windows
 
 
 def spec_fingerprint() -> str:
@@ -63,13 +67,53 @@ class Extractor:
         self.modules: Table = {}
         self.classes: Table = {}
         self._in_progress: set[str] = set()
+        self._listings: dict[Path, frozenset[str]] = {}
         self.skipped = 0
 
     def _names(self, module: str) -> dict | None:
         try:
-            return tc.get_stub_names(module, search_context=self.ctx)
+            names = tc.get_stub_names(module, search_context=self.ctx)
         except Exception:
             return None
+        if names is None or not self._case_exact(module):
+            return None
+        return names
+
+    def _case_exact(self, module: str) -> bool:
+        """The stub's on-disk spelling matches ``module`` exactly.
+
+        On a case-insensitive filesystem (a macOS/Windows dev machine) the finder happily opens
+        ``email/message.pyi`` for the query ``email.Message`` — minting phantom modules that a
+        case-sensitive CI then (correctly) fails to reproduce. The path the finder returns echoes
+        the *queried* case, so the only trustworthy spelling is the directory listing.
+        """
+        try:
+            path = tc.get_stub_file(module, search_context=self.ctx)
+        except Exception:
+            return False
+        if path is None:
+            return False
+        parts = module.split(".")
+        if path.name == "__init__.pyi":
+            path = path.parent  # a package: its directory carries the leaf name
+            expected = parts
+        else:
+            expected = [*parts[:-1], f"{parts[-1]}.pyi"]
+        for name in reversed(expected):
+            if name not in self._listing(path.parent):
+                return False
+            path = path.parent
+        return True
+
+    def _listing(self, directory: Path) -> frozenset[str]:
+        cached = self._listings.get(directory)
+        if cached is None:
+            try:
+                cached = frozenset(entry.name for entry in directory.iterdir())
+            except OSError:
+                cached = frozenset()
+            self._listings[directory] = cached
+        return cached
 
     # --- resolution -------------------------------------------------------------------
     def qualify(self, name: str, module: str) -> str | None:
@@ -301,10 +345,23 @@ def _intersect(tables: list[Table]) -> Table:
 
 def _generate_tables() -> tuple[Table, Table]:
     extractors = [_extract_one(v, PLATFORM) for v in SUPPORTED_VERSIONS]
-    return (
-        _intersect([e.modules for e in extractors]),
-        _intersect([e.classes for e in extractors]),
-    )
+    modules = _intersect([e.modules for e in extractors])
+    classes = _intersect([e.classes for e in extractors])
+    _assert_no_case_collisions(modules)
+    return modules, classes
+
+
+def _assert_no_case_collisions(modules: Table) -> None:
+    """Two MODULE keys differing only by case are a case-insensitive-filesystem artifact (the
+    macOS trap ``_case_exact`` closes) — fail loudly on every platform rather than commit one.
+    Modules only: they come from filesystem lookups, whereas class names come from stub ASTs,
+    where a case pair is legitimate Python (``ast.excepthandler`` vs ``ast.ExceptHandler``)."""
+    seen: dict[str, str] = {}
+    for key in modules:
+        low = key.lower()
+        if low in seen:
+            raise SystemExit(f"case-colliding module keys: {seen[low]!r} vs {key!r}")
+        seen[low] = key
 
 
 def _render(modules: Table, classes: Table) -> str:

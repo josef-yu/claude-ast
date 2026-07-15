@@ -18,5 +18,6 @@ jobs:
       - run: uv run pytest
       - run: uv run ruff check
       - run: uv run pyright
-      - run: uv run --with typeshed-client python tools/python/gen_typeshed.py check
+      # typeshed-client is a locked dev dep — no --with overlay, or the bundled typeshed drifts
+      - run: uv run python tools/python/gen_typeshed.py check
       - run: uv run python eval/calibration/gate.py
