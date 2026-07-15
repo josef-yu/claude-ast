@@ -26,6 +26,13 @@ _BLOCKS = (
     ast.match_case,
 )
 
+# Hot per-node class groups hoisted to module scope, like ``_BLOCKS`` above: an
+# inline ``ast.A | ast.B`` rebuilds a ``types.UnionType`` on every call.
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_ASSIGNMENTS = (ast.Assign, ast.AnnAssign)
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_SEQ_TARGETS = (ast.Tuple, ast.List)
+
 
 def extract_symbols(
     tree: ast.Module, module: str, path: str
@@ -69,7 +76,7 @@ def _visit(
                        signature=_class_sig(child), doc=_docline(child), parent=prefix)
             )
             _visit(child, cid, "class", path, out, seen, node_ids)
-        elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+        elif isinstance(child, _FUNCTIONS):
             fid = _unique(f"{prefix}.{child.name}", seen)
             node_ids[child] = fid
             kind = SymbolKind.METHOD if container == "class" else SymbolKind.FUNCTION
@@ -80,7 +87,7 @@ def _visit(
                        return_type=rtype, return_type_inferred=rtype_inferred)
             )
             _visit(child, fid, "function", path, out, seen, node_ids)
-        elif isinstance(child, ast.Assign | ast.AnnAssign):
+        elif isinstance(child, _ASSIGNMENTS):
             if container in ("module", "class"):
                 for name in _assigned_names(child):
                     vid = f"{prefix}.{name}"
@@ -145,7 +152,7 @@ def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str | N
             else:
                 ambiguous = True  # returns a value we can't name -> don't guess a type
             return
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+        if isinstance(node, _SCOPES):
             return  # a nested scope's returns are its own
         for child in ast.iter_child_nodes(node):
             scan(child)
@@ -193,6 +200,6 @@ def _assigned_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
     for target in targets:
         if isinstance(target, ast.Name):
             names.append(target.id)
-        elif isinstance(target, ast.Tuple | ast.List):
+        elif isinstance(target, _SEQ_TARGETS):
             names += [e.id for e in target.elts if isinstance(e, ast.Name)]
     return names

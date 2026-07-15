@@ -24,6 +24,7 @@ decorator-aware fix is deferred to when ``symbols.py`` tracks staticmethod-ness.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex
@@ -31,11 +32,73 @@ from .binding import bind, external_symbol, resolve_external_type_name, resolve_
 from .stubs import StubProvider
 
 
-def resolve_value_types(
+@dataclass(frozen=True, slots=True)
+class ResolveIndex:
+    """The lookup tables shared, unchanged, across every resolve pass — built once here.
+
+    The syntactic main loop and the three value passes (value-types, in-tree chains, call-site
+    observations) each used to rebuild these independently from ``files``/``edges``; nothing
+    invalidates them between passes, so they collapse to one construction. ``bases`` is the one
+    table derived from edges (INHERITS): it is filled after the syntactic loop, which is safe
+    because no value pass emits an INHERITS edge, so it is already complete there.
+    """
+
+    by_id: dict[SymbolId, Symbol]
+    all_ids: set[SymbolId]
+    internal_roots: set[str]
+    reexports: dict[str, dict[str, str]]
+    module_defs: dict[str, dict[str, str]]  # module id -> {top-level name -> symbol id}
+    members: dict[SymbolId, dict[str, SymbolId]]
+    methods_by_name: dict[str, list[SymbolId]]
+    returns: dict[SymbolId, tuple[SymbolId, bool]]
+    bases: dict[SymbolId, list[SymbolId]]
+
+
+def module_defs_map(files: Sequence[FileIndex]) -> dict[str, dict[str, str]]:
+    """module id -> its top-level ``{name -> symbol id}`` (first-def wins), for every file.
+
+    A module's top-level defs, keyed for O(1) reuse. First definition wins when a name has
+    same-qualname siblings (``#N``), so binding is deterministic regardless of symbol order —
+    the same ``setdefault`` rule every pass applied when it rebuilt this inline.
+    """
+    out: dict[str, dict[str, str]] = {}
+    for fi in files:
+        defs: dict[str, str] = {}
+        for s in fi.symbols:
+            if s.parent == fi.module:
+                defs.setdefault(s.name, s.id)
+        out[fi.module] = defs
+    return out
+
+
+def resolution_index(
     files: Sequence[FileIndex],
     edges: Sequence[Edge],
-    reexports: dict[str, dict[str, str]],
+    *,
+    by_id: dict[SymbolId, Symbol],
+    all_ids: set[SymbolId],
     internal_roots: set[str],
+    reexports: dict[str, dict[str, str]],
+    module_defs: dict[str, dict[str, str]],
+) -> ResolveIndex:
+    """Assemble the shared ``ResolveIndex`` once from the file-derived tables the main loop
+    already built plus the tables derived here (members, methods-by-name, returns, bases)."""
+    return ResolveIndex(
+        by_id=by_id,
+        all_ids=all_ids,
+        internal_roots=internal_roots,
+        reexports=reexports,
+        module_defs=module_defs,
+        members=_members(files),
+        methods_by_name=_methods_by_name(files),
+        returns=_return_types(files, module_defs, reexports, by_id, all_ids),
+        bases=_bases(edges, by_id),
+    )
+
+
+def resolve_value_types(
+    files: Sequence[FileIndex],
+    ctx: ResolveIndex,
     stubs: StubProvider,
 ) -> tuple[list[Edge], list[Symbol]]:
     """Resolve value-typed receiver calls to ``possible`` edges — a confidence ladder:
@@ -56,20 +119,15 @@ def resolve_value_types(
     Runs after syntactic binding so the INHERITS edges the base walk needs are already in
     ``edges``; ``local_root`` refs only, single attribute (chained ``a.b.c`` deferred).
     """
-    by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
-    all_ids = set(by_id)
-    members = _members(files)
-    bases = _bases(edges, by_id)
-    methods_by_name = _methods_by_name(files)
-    returns = _return_types(files, reexports, by_id, all_ids)
+    by_id, all_ids = ctx.by_id, ctx.all_ids
+    reexports, internal_roots = ctx.reexports, ctx.internal_roots
+    members, bases = ctx.members, ctx.bases
+    methods_by_name, returns = ctx.methods_by_name, ctx.returns
 
     out: list[Edge] = []
     externals: list[Symbol] = []  # stub member nodes minted for out-of-tree receiver types
     for fi in files:
-        module_defs: dict[str, str] = {}
-        for s in fi.symbols:
-            if s.parent == fi.module:
-                module_defs.setdefault(s.name, s.id)
+        module_defs = ctx.module_defs[fi.module]
         for ref in fi.refs:
             if ref.chain and ref.local_root:
                 # value-rooted call-return chain (`self.get().run()`): resolve the receiver's
@@ -158,9 +216,7 @@ def resolve_value_types(
 
 def resolve_intree_chains(
     files: Sequence[FileIndex],
-    edges: Sequence[Edge],
-    reexports: dict[str, dict[str, str]],
-    internal_roots: set[str],
+    ctx: ResolveIndex,
 ) -> list[Edge]:
     """Call-return chains whose receiver returns an *in-tree* type: ``make().run()`` where
     ``make() -> Service`` -> ``Service.run`` (MEDIUM). The external counterpart lives in
@@ -172,18 +228,12 @@ def resolve_intree_chains(
     whose receiver binds to an in-tree function are handled — external receivers are resolved in
     ``chains`` during binding; a receiver or hop with no resolvable return type declines the chain.
     """
-    by_id: dict[SymbolId, Symbol] = {sym.id: sym for fi in files for sym in fi.symbols}
-    all_ids = set(by_id)
-    members = _members(files)
-    bases = _bases(edges, by_id)
-    returns = _return_types(files, reexports, by_id, all_ids)
+    all_ids, internal_roots, reexports = ctx.all_ids, ctx.internal_roots, ctx.reexports
+    members, bases, returns = ctx.members, ctx.bases, ctx.returns
 
     out: list[Edge] = []
     for fi in files:
-        module_defs: dict[str, str] = {}
-        for s in fi.symbols:
-            if s.parent == fi.module:
-                module_defs.setdefault(s.name, s.id)
+        module_defs = ctx.module_defs[fi.module]
         for ref in fi.refs:
             if not ref.chain:
                 continue
@@ -204,6 +254,7 @@ def resolve_intree_chains(
 
 def _return_types(
     files: Sequence[FileIndex],
+    module_defs: dict[str, dict[str, str]],
     reexports: dict[str, dict[str, str]],
     by_id: dict[SymbolId, Symbol],
     all_ids: set[SymbolId],
@@ -216,15 +267,12 @@ def _return_types(
     """
     returns: dict[SymbolId, tuple[SymbolId, bool]] = {}
     for fi in files:
-        module_defs: dict[str, str] = {}
-        for s in fi.symbols:
-            if s.parent == fi.module:
-                module_defs.setdefault(s.name, s.id)
+        defs = module_defs[fi.module]
         for sym in fi.symbols:
             if sym.return_type is None:
                 continue
             cls = resolve_type_name(
-                sym.return_type, module_defs, fi.imports, all_ids, reexports, by_id
+                sym.return_type, defs, fi.imports, all_ids, reexports, by_id
             )
             if cls is not None:
                 returns[sym.id] = (cls, sym.return_type_inferred)

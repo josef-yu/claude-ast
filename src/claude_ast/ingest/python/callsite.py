@@ -20,17 +20,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
+from ...model import Edge, EdgeKind, Resolution, SymbolKind
 from ..product import FileIndex
 from .binding import bind, resolve_type_name
+from .typeres import ResolveIndex
 
 
 def observe_arg_types(
     files: Sequence[FileIndex],
-    all_ids: set[SymbolId],
-    internal_roots: set[str],
-    reexports: dict[str, dict[str, str]],
-    by_id: dict[SymbolId, Symbol],
+    ctx: ResolveIndex,
 ) -> list[Edge]:
     """Definite ``RECEIVES_ARG`` edges from the concrete types seen at call sites.
 
@@ -40,12 +38,11 @@ def observe_arg_types(
     ``callee -> class`` edge at the call-site span. Iterates files/refs in the given
     (sorted) order, so the edge list is deterministic and warm rebuilds reproduce it.
     """
+    by_id, all_ids = ctx.by_id, ctx.all_ids
+    internal_roots, reexports = ctx.internal_roots, ctx.reexports
     out: list[Edge] = []
     for fi in files:
-        module_defs: dict[str, str] = {}
-        for s in fi.symbols:
-            if s.parent == fi.module:
-                module_defs.setdefault(s.name, s.id)
+        module_defs = ctx.module_defs[fi.module]
         for ref in fi.refs:
             if ref.local_root or ref.kind is not EdgeKind.CALL or not ref.arg_types:
                 continue

@@ -22,7 +22,12 @@ from .common import module_qualname
 from .refs import extract_refs
 from .stubs import STDLIB_STUBS, StubProvider
 from .symbols import extract_symbols
-from .typeres import resolve_intree_chains, resolve_value_types
+from .typeres import (
+    module_defs_map,
+    resolution_index,
+    resolve_intree_chains,
+    resolve_value_types,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,15 +92,13 @@ class PythonIndexer:
         # Each module's import map doubles as its re-export table: a name imported into
         # module M is reachable as M.name, so `from pkg import X` follows pkg's __init__.
         reexports = {fi.module: fi.imports for fi in files}
+        # Each module's top-level {name -> id} (first-def wins), built once and reused by the
+        # loop below and every value pass — the shared ResolveIndex assembled after this loop.
+        module_defs_by_module = module_defs_map(files)
         edges: list[Edge] = []
         externals: dict[str, Symbol] = {}
         for fi in files:
-            # First definition wins when a name has same-qualname siblings (``#N``),
-            # so binding is deterministic regardless of symbol order.
-            module_defs: dict[str, str] = {}
-            for s in fi.symbols:
-                if s.parent == fi.module:
-                    module_defs.setdefault(s.name, s.id)
+            module_defs = module_defs_by_module[fi.module]
             for ref in fi.refs:
                 if ref.kind is EdgeKind.IMPORT:
                     # module dependency: keep only imports that land on an in-tree module.
@@ -157,19 +160,29 @@ class PythonIndexer:
                 seen_imports.add((fi.module, target))
                 edge = Edge(fi.module, target, EdgeKind.IMPORT, Resolution.syntactic(), None)
                 edges.append(edge)
+        # Assemble the shared lookup tables once, now that the syntactic edges (INHERITS) exist
+        # for the base walk. The three value passes below read these instead of each rebuilding
+        # by_id / members / bases / returns / module_defs from scratch.
+        ctx = resolution_index(
+            files,
+            edges,
+            by_id=by_id,
+            all_ids=all_ids,
+            internal_roots=internal_roots,
+            reexports=reexports,
+            module_defs=module_defs_by_module,
+        )
         # Value-typed pass: self.m() and annotated `u: User; u.m()` -> MEDIUM/possible edges,
         # plus stub-resolved members on external types (`p: Path; p.exists()`) as MEDIUM STUB
         # edges to external nodes. Runs after syntactic binding, so cross-file INHERITS present.
-        value_edges, stub_externals = resolve_value_types(
-            files, edges, reexports, internal_roots, self._stubs
-        )
+        value_edges, stub_externals = resolve_value_types(files, ctx, self._stubs)
         edges.extend(value_edges)
         for ext in stub_externals:
             externals.setdefault(ext.id, ext)
         # Call-return chains whose receiver returns an in-tree type (`make() -> Service`;
         # `make().run()` -> Service.run). Uses the INHERITS edges already in `edges`.
-        edges.extend(resolve_intree_chains(files, edges, reexports, internal_roots))
+        edges.extend(resolve_intree_chains(files, ctx))
         # Call-site observations: `g(User())` -> a definite `g RECEIVES_ARG User` edge. A
         # usage fact, independent of the dispatch passes above (no edges needed as input).
-        edges.extend(observe_arg_types(files, all_ids, internal_roots, reexports, by_id))
+        edges.extend(observe_arg_types(files, ctx))
         return ResolveResult(edges=edges, externals=list(externals.values()))

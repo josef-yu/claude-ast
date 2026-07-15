@@ -36,6 +36,25 @@ from ...model import EdgeKind
 from ..product import RawRef
 from .common import span
 
+# Node-class groups hoisted to module scope. An inline ``ast.A | ast.B`` in a hot
+# per-node predicate rebuilds a ``types.UnionType`` on *every* call (millions of
+# them across a large tree); a module-level tuple is built once and matched in C
+# by ``isinstance`` (which also keeps the type-narrowing the branch bodies rely
+# on). Same idiom as ``symbols._BLOCKS``.
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_FUNCTIONS_OR_CLASS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+_LAMBDA_OR_GLOBALS = (ast.Lambda, ast.Global, ast.Nonlocal)  # nested-scope/rebinds-nothing skip
+_IMPORTS = (ast.Import, ast.ImportFrom)
+_SEQ_TARGETS = (ast.Tuple, ast.List)
+# _add_bound groups: node types that bind their target via ``node.target``, and
+# the two-member ``with`` / ``match``-name groups.
+_TARGET_NODES = (
+    ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr, ast.comprehension,
+)
+_WITH_NODES = (ast.With, ast.AsyncWith)
+_MATCH_NAME_NODES = (ast.MatchAs, ast.MatchStar)
+
 
 def extract_refs(
     tree: ast.Module, module: str, path: str, node_ids: dict[ast.AST, str]
@@ -64,9 +83,7 @@ def _import_refs(tree: ast.Module, module: str, package: str, path: str) -> list
 
     def scan(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
-            ):
+            if isinstance(child, _SCOPES):
                 continue  # a separate scope — its imports are not module-wide
             if isinstance(child, ast.Import):
                 for alias in child.names:
@@ -125,7 +142,7 @@ def _visit(
             _visit(stmt, cid, path, refs, class_locals, types, node_ids)
         return
 
-    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+    if isinstance(node, _FUNCTIONS):
         fid = node_ids.get(node) or f"{enclosing}.{node.name}"
         # decorators, default values, and annotations evaluate in the ENCLOSING scope
         for deco in node.decorator_list:
@@ -143,11 +160,11 @@ def _visit(
         # A name this scope rebinds drops the outer type (an untyped shadow must not inherit
         # a stale annotation); precedence: a declared annotation beats an inferred
         # `x = Foo()`, both beat an outer-scope type that survives (a genuine closure read).
-        fn_locals = _function_locals(node)
+        fn_locals, inferred = _function_scope(node, locals_)
         inner = [*locals_, fn_locals]
         inner_types = {
             **{n: v for n, v in types.items() if n not in fn_locals},
-            **{name: (t, True) for name, t in _inferred_types(node, inner).items()},
+            **{name: (t, True) for name, t in inferred.items()},
             **{name: (t, False) for name, t in _annotated_types(node).items()},
         }
         for stmt in node.body:
@@ -328,51 +345,89 @@ def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, st
     return types
 
 
-def _inferred_types(
-    fn: ast.FunctionDef | ast.AsyncFunctionDef, locals_: list[frozenset[str]]
-) -> dict[str, str]:
-    """Local name -> the type it is constructed from (``x = User()`` -> ``x: User``), for
-    the inference resolver.
+def _function_scope(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, outer: list[frozenset[str]]
+) -> tuple[frozenset[str], dict[str, str]]:
+    """One subtree walk yielding both a function's bound-name set (``fn_locals``) and its
+    ``local name -> constructed type`` inference map (``x = User()`` -> ``x: User``).
 
-    Flow-insensitive and conservative, so a name keeps a type only when every binding
-    agrees. Dropped — never guessed: a name assigned from two distinct constructors; a
-    constructor whose name is shadowed by a local (``def f(User): x = User()`` constructs
-    the *parameter*, not the module class); and a name *re-bound by anything else*
-    (``x = User(); x = 5`` / ``for x in ...`` — the type no longer holds at every use).
-    The candidate is the callee name; the resolver keeps it only if it resolves to a class
-    (``x = helper()`` where helper is a function yields no edge). Nested scopes are not
-    descended; true flow-sensitivity (per-use types) stays deferred.
+    Fuses the two passes that each independently walked the whole function body:
+    ``_function_locals`` (every name bound in ``fn``'s own scope — over-broad by design; see
+    ``_local`` callers) and ``_inferred_types`` (flow-insensitive, conservative construction
+    inference). One walk over the body instead of two.
+
+    **Accumulate-then-filter.** The inference's constructor-shadow test — ``x = User()`` yields
+    a type only if ``User`` is not shadowed by a local — needs the COMPLETE ``fn_locals``,
+    because a ctor name can be rebound *later* in the body (``x = User(); User = 5``). So ctor
+    assignments are recorded during the walk (``typed``) and the candidate/rebound decision is
+    made afterwards, once ``fn_locals`` is final. Inference stays conservative: a name assigned
+    from two distinct constructors, a shadowed ctor, or a name rebound by anything else is
+    dropped, never guessed — the resolver later keeps only ctors that resolve to a class.
+
+    ``names``/``rebound`` bookkeeping mirrors the two originals exactly, including the
+    Assign-with-Call asymmetry: the target subtree feeds only ``fn_locals`` (as
+    ``_function_locals`` did), the value subtree feeds both (a walrus there binds a local the
+    old ``_inferred_types`` also saw). Nested scopes contribute only their *name*; their bodies
+    are not descended.
     """
-    candidates: dict[str, set[str]] = {}
+    names: set[str] = {arg.arg for arg in _all_args(fn.args)}
     rebound: set[str] = set()  # names also bound to a value we can't type
+    typed: list[tuple[ast.Assign, str]] = []  # (assign, ctor) — filtered after names is complete
 
-    def scan(node: ast.AST) -> None:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
-            return  # a separate scope — its assignments are not this function's
+    def add_names(node: ast.AST) -> None:
+        # _function_locals bookkeeping: bound names + nested def/class names, skip nested scopes.
+        if isinstance(node, _FUNCTIONS_OR_CLASS):
+            names.add(node.name)
+            return
+        if isinstance(node, _LAMBDA_OR_GLOBALS):
+            return
+        _add_bound(node, names)
+        for child in ast.iter_child_nodes(node):
+            add_names(child)
+
+    def walk(node: ast.AST) -> None:
+        if isinstance(node, _SCOPES):
+            add_names(node)  # a separate scope, but its NAME still binds a local
+            return
         if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            _add_bound(node, names)  # simple targets -> fn_locals
+            for target in node.targets:  # rare walrus inside a target -> fn_locals only
+                for child in ast.iter_child_nodes(target):
+                    add_names(child)
             ctor = _dotted_name(node.value.func)
-            if ctor is not None and not _local(ctor.partition(".")[0], locals_):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        candidates.setdefault(target.id, set()).add(ctor)
-                    else:
-                        _add_target(target, rebound)  # unpacking a call result — untyped
+            if ctor is not None:
+                typed.append((node, ctor))  # defer the ctor-shadow decision
             else:
                 _add_bound(node, rebound)  # a value we can't name rebinds the targets
             for child in ast.iter_child_nodes(node.value):
-                scan(child)  # a walrus inside the call's own args still binds
+                walk(child)  # a walrus inside the call's own args still binds (names + rebound)
             return
+        _add_bound(node, names)
         _add_bound(node, rebound)
         for child in ast.iter_child_nodes(node):
-            scan(child)
+            walk(child)
 
     for stmt in fn.body:
-        scan(stmt)
-    return {
+        walk(stmt)
+
+    fn_locals = frozenset(names)
+    scopes = [*outer, fn_locals]  # ctor-root locality is tested against the complete scope
+    candidates: dict[str, set[str]] = {}
+    for node, ctor in typed:
+        if not _local(ctor.partition(".")[0], scopes):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    candidates.setdefault(target.id, set()).add(ctor)
+                else:
+                    _add_target(target, rebound)  # unpacking a call result — untyped
+        else:
+            _add_bound(node, rebound)  # ctor shadowed by a local -> value we can't name
+    inferred = {
         name: next(iter(ctors))
         for name, ctors in candidates.items()
         if len(ctors) == 1 and name not in rebound
     }
+    return fn_locals, inferred
 
 
 def _all_args(args: ast.arguments) -> list[ast.arg]:
@@ -384,49 +439,24 @@ def _all_args(args: ast.arguments) -> list[ast.arg]:
     return result
 
 
-def _function_locals(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
-    """Every name bound in ``fn``'s own scope (over-broad by design — see module docstring).
-
-    Includes parameters, all binding targets in the body, and nested def/class
-    names, but does not descend into nested scopes (their locals are their own).
-    A bare ``global``/``nonlocal x`` binds nothing, so ``x`` is absent here and refers
-    outward — an outer import/class binds normally. But ``global x; x = ...`` *reassigns*
-    that outer name to an unknown value, so ``x`` IS captured as a local shadow (via the
-    assignment): else a rebound import/class name would forge a confidently-wrong edge
-    (``global os; os = f(); os.g()`` must not bind ``os`` to the stdlib module, and
-    ``global User; User = 5; h(User())`` must not report ``User`` as a passed type).
-    """
-    names: set[str] = {arg.arg for arg in _all_args(fn.args)}
-
-    def process(node: ast.AST) -> None:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
-            names.add(node.name)  # bound here; its body is a separate scope, not descended
-        elif isinstance(node, ast.Lambda):
-            pass  # lambda body is a separate scope
-        elif isinstance(node, ast.Global | ast.Nonlocal):
-            pass  # binds nothing itself; a reassignment `x = ...` is caught as an Assign below
-        else:
-            _add_bound(node, names)
-            for child in ast.iter_child_nodes(node):
-                process(child)
-
-    for stmt in fn.body:
-        process(stmt)
-    return frozenset(names)
-
-
 def _binder_names(body: list[ast.stmt]) -> frozenset[str]:
     """Names value-bound in a module or class body — assignment / for / with / except /
     comprehension / walrus / match targets — used to shadow-protect value receivers at
-    module and class scope, as ``_function_locals`` does inside functions. Imports are
+    module and class scope, as ``_function_scope`` does inside functions. Imports are
     excluded (they are resolution targets, not shadows); nested scopes are not descended.
+
+    A function's own scope is over-broad by design: a bare ``global``/``nonlocal x`` binds
+    nothing (``x`` refers outward), but ``global x; x = ...`` reassigns that outer name to an
+    unknown value, so ``x`` IS captured as a local shadow via the assignment — else a rebound
+    import/class name would forge a confidently-wrong edge (``global os; os = f(); os.g()``
+    must not bind the stdlib module; ``global User; User = 5; h(User())`` must not report a type).
     """
     names: set[str] = set()
 
     def process(node: ast.AST) -> None:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda):
+        if isinstance(node, _SCOPES):
             return  # a separate scope — its bindings are its own
-        if isinstance(node, ast.Import | ast.ImportFrom):
+        if isinstance(node, _IMPORTS):
             return  # a resolution target, not a shadowing local
         _add_bound(node, names)
         for child in ast.iter_child_nodes(node):
@@ -438,24 +468,26 @@ def _binder_names(body: list[ast.stmt]) -> frozenset[str]:
 
 
 def _add_bound(node: ast.AST, names: set[str]) -> None:
+    # The hottest per-node call in ingest (~2M/build). Branches are type-disjoint,
+    # so order is immaterial; AnnAssign/AugAssign/For/AsyncFor/NamedExpr/comprehension
+    # all bind via ``.target`` and collapse to ``_TARGET_NODES``. All predicates use
+    # hoisted tuples so no ``UnionType`` is built per call.
     if isinstance(node, ast.Assign):
         for target in node.targets:
             _add_target(target, names)
-    elif isinstance(node, ast.AnnAssign | ast.AugAssign | ast.For | ast.AsyncFor):
+    elif isinstance(node, _TARGET_NODES):
         _add_target(node.target, names)
-    elif isinstance(node, ast.With | ast.AsyncWith):
+    elif isinstance(node, _WITH_NODES):
         for item in node.items:
             if item.optional_vars is not None:
                 _add_target(item.optional_vars, names)
     elif isinstance(node, ast.ExceptHandler):
         if node.name:
             names.add(node.name)
-    elif isinstance(node, ast.NamedExpr | ast.comprehension):
-        _add_target(node.target, names)
-    elif isinstance(node, ast.Import | ast.ImportFrom):
+    elif isinstance(node, _IMPORTS):
         for alias in node.names:
             names.add(alias.asname or alias.name.split(".")[0])
-    elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+    elif isinstance(node, _MATCH_NAME_NODES) and node.name:
         names.add(node.name)  # `case <name>:` / `case [*<name>]` binds a local
     elif isinstance(node, ast.MatchMapping) and node.rest:
         names.add(node.rest)  # `case {**<rest>}` binds a local
@@ -466,7 +498,7 @@ def _add_target(target: ast.expr, names: set[str]) -> None:
         names.add(target.id)
     elif isinstance(target, ast.Starred):
         _add_target(target.value, names)
-    elif isinstance(target, ast.Tuple | ast.List):
+    elif isinstance(target, _SEQ_TARGETS):
         for elt in target.elts:
             _add_target(elt, names)
 
@@ -502,9 +534,7 @@ def _collect_imports(tree: ast.Module, package: str) -> dict[str, str]:
 
     def scan(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(
-                child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Lambda
-            ):
+            if isinstance(child, _SCOPES):
                 continue  # a separate scope — its imports are not module-wide
             if isinstance(child, ast.Import):
                 for alias in child.names:

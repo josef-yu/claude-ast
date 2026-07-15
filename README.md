@@ -123,15 +123,33 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
 
 - **P2 resolvers** — an environment-aware provider for *third-party* stubs (`django-stubs`
   et al.; bounded ROI, since their hardest types are mypy-plugin-computed and absent from
-  `.pyi`); call-site observations for external and method/constructor callees; stub
-  signatures / return types for chaining (`Path.cwd().exists()`); annotated local
-  assignments (`x: User = ...`) and flow-sensitive reassignment; a decorator-aware fix for
-  the `@staticmethod`-named-`self` edge.
+  `.pyi`); call-site observations for external and method/constructor callees; annotated
+  local assignments (`x: User = ...`) and per-use flow sensitivity (rebinding drops the type
+  today rather than tracking it); a decorator-aware fix for the `@staticmethod`-named-`self`
+  edge.
+- **Attribute-read edges** — calls, imports, inheritance, and arg observations are the only
+  edge kinds emitted today; a bare attribute read (`obj.attr` with no call) yields nothing,
+  so `find_references` under-reports pure reads. Emit `REFERENCE` edges through the same
+  receiver ladder, carrying the same tiers.
+- **Framework-convention rungs** — Django-aware resolution the generic ladder can't see: the
+  manager convention (`Model.objects…`), celery task attributes (`fn.delay(…)` → the task
+  function), router `register(…)` / `as_view()` targets. Convention-based, so `possible` at
+  best — never dressed up as definite.
+- **Unknown id vs. zero results** — a mistyped or unknown symbol id currently reads exactly
+  like a true empty answer ("no callers"); report "no such symbol" distinctly, ideally with a
+  near-miss suggestion.
+- **importers scope** — function-scoped imports are excluded from the module graph by design
+  (not a module-wide dependency), but they are real dependencies for impact analysis; add an
+  opt-in flag that includes them, flagged as function-local.
+- **repo-map ranking** — test files reference everything, so they float to the top and crowd
+  the budget; down-rank test code in the ranker.
 - **id scheme** — the structured module/member id redesign (the lean fixes are in; the
   cross-file collision guard is dormant — 0 hits across Django's 17.7k symbols).
-- **P3 refinements** — persisting live-session edits back to the snapshot; a name→importers
-  index to skip the global re-resolve on patch (~0.3s warm today); a rank cache invalidated
-  on swap.
+- **P3 refinements** — persisting live-session edits back to the snapshot; **last-good-parse
+  retention** (a mid-edit syntax error drops the file from the served view today — keep the
+  previous good parse, marked stale, until the file parses again); **incremental resolve on
+  patch** (a name→importers index so a change re-resolves only its dependents instead of the
+  global re-resolve, ~0.3s warm today); a rank cache invalidated on swap.
 - **Second language** — a JS/TS backend. The seam is already built for it: `ast` is confined
   to `ingest/python/`, external ids are backend-owned, and tooling is partitioned under
   `tools/<language>/`.
