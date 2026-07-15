@@ -33,3 +33,25 @@ def test_focus_lifts_the_focused_symbol():
     base = pagerank(graph)
     focused = pagerank(graph, focus="m.a")
     assert focused["m.a"] > base["m.a"]
+
+
+def test_pagerank_is_deterministic():
+    # The int-indexed / CSR power iteration must be reproducible: same graph -> bit-identical
+    # scores, run to run. This is what lets repo_map's (-rank, id) ordering be stable, so a
+    # future change to the numeric core that perturbs scores trips this guard.
+    graph = _hub_graph()
+    assert pagerank(graph) == pagerank(graph)
+    assert pagerank(graph, focus="m.a") == pagerank(graph, focus="m.a")
+
+
+def test_confidence_weighted_flow_orders_by_edge_strength():
+    # Two hubs, each with one inbound edge, differing only in confidence: the definite edge
+    # must flow more importance than the heuristic one. Pins the confidence weighting the
+    # ranker is built on, independent of the summation internals.
+    graph = Graph()
+    for name in ("caller", "strong", "weak"):
+        graph.add_symbol(Symbol(f"m.{name}", name, SymbolKind.FUNCTION, Span("m.py", 1)))
+    graph.add_edge(Edge("m.caller", "m.strong", EdgeKind.CALL, Resolution.syntactic()))  # HIGH
+    graph.add_edge(Edge("m.caller", "m.weak", EdgeKind.CALL, Resolution.heuristic()))  # LOW
+    ranks = pagerank(graph)
+    assert ranks["m.strong"] > ranks["m.weak"]

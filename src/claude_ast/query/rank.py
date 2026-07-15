@@ -29,41 +29,61 @@ def pagerank(
     damping: float = 0.85,
     iterations: int = 40,
 ) -> dict[SymbolId, float]:
+    """Confidence-weighted PageRank, returned as ``symbol id -> score``.
+
+    Int-indexed / CSR internally: nodes are numbered by their ``graph.symbols()`` order and the
+    adjacency is flat ``(dst-index, weight)`` arrays, so the power iteration is list-indexed
+    arithmetic instead of per-edge dict hashing — several times faster on a large graph. The
+    operation order (nodes in symbol order, out-edges in ``out_edges`` order) and the fixed
+    iteration count are preserved exactly, so the resulting scores are bit-identical to the
+    reference dict implementation — repo_map's ``(-rank, id)`` ordering cannot shift.
+    """
     ids = [sym.id for sym in graph.symbols()]
     n = len(ids)
     if n == 0:
         return {}
 
+    index = {sid: k for k, sid in enumerate(ids)}
     teleport = _teleport(graph, ids, focus)
-    internal = set(ids)  # externals are excluded from graph.symbols(), so not ranked
-    adjacency: dict[SymbolId, list[tuple[SymbolId, float]]] = {}
-    out_weight: dict[SymbolId, float] = {}
-    for i in ids:
-        # Edges to EXTERNAL sinks carry no importance (and aren't ranked nodes), so
-        # they neither flow rank nor count toward this node's out-weight. Self-loops
-        # (a recursive call) are dropped too — they would only feed a node's rank back
-        # into itself and inflate it.
-        pairs = [
-            (e.dst, _WEIGHT[e.resolution.confidence])
-            for e in graph.out_edges(i)
-            if e.kind in _RANK_KINDS and e.dst in internal and e.dst != i
-        ]
-        adjacency[i] = pairs
-        out_weight[i] = sum(w for _, w in pairs)
+    tele = [teleport[sid] for sid in ids]
 
-    rank = dict.fromkeys(ids, 1.0 / n)
+    # CSR adjacency: out-neighbour index + weight, sliced per node by `starts`.
+    # Edges to EXTERNAL sinks carry no importance (and aren't ranked nodes), so they
+    # neither flow rank nor count toward out-weight. Self-loops (a recursive call) are
+    # dropped too — they would only feed a node's rank back into itself and inflate it.
+    starts = [0] * (n + 1)
+    dsts: list[int] = []
+    weights: list[float] = []
+    out_weight = [0.0] * n
+    for k, sid in enumerate(ids):
+        start = len(dsts)
+        for e in graph.out_edges(sid):
+            if e.kind in _RANK_KINDS:
+                j = index.get(e.dst)
+                if j is not None and j != k:  # in-tree, non-self
+                    dsts.append(j)
+                    weights.append(_WEIGHT[e.resolution.confidence])
+        starts[k + 1] = len(dsts)
+        # sum() (not an incremental +=): its compensated float summation matches the reference
+        # exactly, so `share` below — and the resulting ranks — stay bit-identical.
+        out_weight[k] = sum(weights[start:])
+
+    base = [(1.0 - damping) * t for t in tele]  # the teleport term, constant across iterations
+    dangling_idx = [k for k in range(n) if out_weight[k] == 0.0]
+    rank = [1.0 / n] * n
     for _ in range(iterations):
-        nxt = {i: (1.0 - damping) * teleport[i] for i in ids}
+        nxt = base[:]
         # dangling nodes (no outbound weight) redistribute their mass via teleport
-        dangling = damping * sum(rank[i] for i in ids if out_weight[i] == 0.0)
-        for i in ids:
-            nxt[i] += dangling * teleport[i]
-            if out_weight[i] > 0.0:
-                share = damping * rank[i] / out_weight[i]
-                for dst, w in adjacency[i]:
-                    nxt[dst] += share * w
+        dangling = damping * sum(rank[k] for k in dangling_idx)
+        for k in range(n):
+            nxt[k] += dangling * tele[k]
+            ow = out_weight[k]
+            if ow > 0.0:
+                share = damping * rank[k] / ow
+                for p in range(starts[k], starts[k + 1]):
+                    nxt[dsts[p]] += share * weights[p]
         rank = nxt
-    return rank
+    return {sid: rank[k] for k, sid in enumerate(ids)}
 
 
 def _teleport(graph: Graph, ids: list[SymbolId], focus: str | None) -> dict[SymbolId, float]:

@@ -45,3 +45,26 @@ def test_render_leads_with_module_header_and_shows_signatures():
     text = render_repo_map(repo_map(_graph()))
     assert text.splitlines()[0] == "m"  # module header
     assert "def hub()" in text
+
+
+def test_ordering_is_stable_across_calls_and_independent_graphs():
+    # The rendered ordering is the determinism guarantee repo_map makes. A repeat call (a cache
+    # hit) and a second, independently-built identical graph (a cache miss) must both reproduce
+    # the exact same ordering — so the memoization can never leak between graphs or drift.
+    order = [e.id for e in repo_map(_graph())]
+    assert [e.id for e in repo_map(_graph())] == order  # fresh graph, cache miss -> identical
+    g = _graph()
+    assert [e.id for e in repo_map(g)] == order
+    assert [e.id for e in repo_map(g)] == order  # same graph, cache hit -> identical
+
+
+def test_no_focus_result_is_memoized_and_a_focus_query_bypasses_it():
+    from claude_ast.query.repomap import _NO_FOCUS_CACHE  # white-box: guard the cache itself
+
+    g = _graph()
+    assert g not in _NO_FOCUS_CACHE
+    no_focus = [e.id for e in repo_map(g)]
+    assert g in _NO_FOCUS_CACHE  # the no-focus ranks + candidates are cached for reuse
+
+    repo_map(g, focus="m.a")  # a focus query must not read or overwrite the no-focus cache
+    assert [e.id for e in repo_map(g)] == no_focus  # no-focus result still intact after it

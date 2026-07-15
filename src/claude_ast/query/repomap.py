@@ -10,12 +10,41 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from weakref import WeakKeyDictionary
 
 from ..model import Graph, Symbol, SymbolId, SymbolKind
 from .rank import pagerank
 
 # The structural skeleton — modules become headers, variables are omitted as noise.
 _STRUCTURAL = (SymbolKind.CLASS, SymbolKind.FUNCTION, SymbolKind.METHOD)
+
+# The no-focus ranks and the (-rank, id)-sorted structural candidates are a pure function of the
+# graph, but cost a 40-iteration PageRank plus a full-population sort each call. The server serves
+# repo_map with the default (no) focus repeatedly against one graph, so memoize both, keyed weakly
+# on graph identity: a watcher patch swaps in a fresh graph and the stale entry is collected. Only
+# the focus=None case is cached (a focus makes the ranks and the sort focus-specific).
+_NoFocus = tuple[dict[SymbolId, float], list[Symbol]]
+_NO_FOCUS_CACHE: WeakKeyDictionary[Graph, _NoFocus] = WeakKeyDictionary()
+
+
+def _ranked_candidates(graph: Graph, focus: str | None) -> _NoFocus:
+    """The ranks and rank-sorted structural candidates, memoized for the focus=None hot path."""
+    if focus is not None:
+        return _rank_and_sort(graph, focus)
+    cached = _NO_FOCUS_CACHE.get(graph)
+    if cached is None:
+        cached = _rank_and_sort(graph, None)
+        _NO_FOCUS_CACHE[graph] = cached
+    return cached
+
+
+def _rank_and_sort(graph: Graph, focus: str | None) -> _NoFocus:
+    ranks = pagerank(graph, focus)
+    # Rank desc, then id asc as an explicit tie-break: the huge population of equal-rank
+    # (no-inbound) symbols must order on stable id, not insertion order.
+    candidates = [s for s in graph.symbols() if s.kind in _STRUCTURAL]
+    candidates.sort(key=lambda s: (-ranks.get(s.id, 0.0), s.id))
+    return ranks, candidates
 
 
 @dataclass(slots=True)
@@ -33,11 +62,9 @@ class RepoMapEntry:
 
 def repo_map(graph: Graph, budget: int = 2000, focus: str | None = None) -> list[RepoMapEntry]:
     """The top structural symbols by rank, filled to ``budget`` tokens."""
-    ranks = pagerank(graph, focus)
-    candidates = [s for s in graph.symbols() if s.kind in _STRUCTURAL]
-    # Rank desc, then id asc as an explicit tie-break: the huge population of
-    # equal-rank (no-inbound) symbols must order on stable id, not insertion order.
-    candidates.sort(key=lambda s: (-ranks.get(s.id, 0.0), s.id))
+    # ranks + candidates are budget-independent, so they're shared across budgets and cached
+    # for the focus=None hot path; only the fill loop below depends on ``budget``.
+    ranks, candidates = _ranked_candidates(graph, focus)
 
     entries: list[RepoMapEntry] = []
     spent = 0

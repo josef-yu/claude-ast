@@ -22,7 +22,13 @@ class Graph:
     what lets incremental invalidation find edges pointing *into* a changed file.
     """
 
-    __slots__ = ("_symbols", "_out", "_in", "_by_file", "_by_name", "_children", "_externals")
+    # ``__weakref__`` lets the query layer hang a weakly-keyed cache (e.g. repo_map's ranks)
+    # off a graph without the model knowing about it — the entry dies when the graph is
+    # replaced by a patch. It costs one pointer on the single live Graph, not on any Symbol.
+    __slots__ = (
+        "_symbols", "_out", "_in", "_by_file", "_by_name", "_children", "_externals",
+        "__weakref__",
+    )
 
     def __init__(self) -> None:
         self._symbols: dict[SymbolId, Symbol] = {}

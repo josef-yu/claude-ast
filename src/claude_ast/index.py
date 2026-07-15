@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 
 from .ingest import Indexer, default_indexers, ingest_project
@@ -46,13 +47,16 @@ def store_path(root: Path) -> Path:
 
 def _assemble(
     files: Sequence[FileIndex], backends: Sequence[Indexer]
-) -> tuple[Graph, ResolutionMetrics]:
+) -> tuple[Graph, int]:
     """Build the in-memory graph from per-file products: symbols first, then each backend's edges.
 
     The language-neutral assembly shared by the one-shot ``Index.build`` and the long-lived
     ``IndexSession``. Edges are rebuilt from the persisted products on every assembly — the
     reason warm == cold, and the reason a session patch resolves *globally* (a new file can
     newly-bind references in files that did not themselves change).
+
+    Returns the graph and the raw-reference count (the coverage denominator); the metrics
+    summary itself is derived lazily by ``Index.metrics``, off the serving and patch paths.
     """
     graph = Graph()
     for fi in files:
@@ -68,7 +72,7 @@ def _assemble(
     # IMPORT refs are module-dependency edges, not the reference-binding the coverage metric
     # measures, so they're excluded from the denominator (as their edges are from the numerator).
     total_refs = sum(1 for fi in files for r in fi.refs if r.kind is not EdgeKind.IMPORT)
-    return graph, resolution_metrics(total_refs, graph)
+    return graph, total_refs
 
 
 class Index:
@@ -77,12 +81,23 @@ class Index:
         graph: Graph,
         root: Path,
         skipped: Sequence[str] = (),
-        metrics: ResolutionMetrics | None = None,
+        total_refs: int = 0,
     ) -> None:
         self.graph = graph
         self.root = root
         self.skipped = list(skipped)  # paths that couldn't be read/parsed this build
-        self.metrics = metrics or ResolutionMetrics(0, 0, {}, {})
+        self._total_refs = total_refs  # coverage denominator; metrics is derived from it lazily
+
+    @cached_property
+    def metrics(self) -> ResolutionMetrics:
+        """Coverage + confidence/source distribution — computed on first access, not at build.
+
+        A dev/reporting diagnostic (``claude-ast index``, the calibration harness): it walks
+        every edge, so deriving it lazily keeps it off the query and watcher-patch hot paths,
+        which never read it. Cached per ``Index`` — a patch builds a fresh ``Index``, so a new
+        view recomputes against its own graph.
+        """
+        return resolution_metrics(self._total_refs, self.graph)
 
     @classmethod
     def build(
@@ -111,8 +126,8 @@ class Index:
             if store is not None:
                 store.close()  # commit + release even if ingest raised
 
-        graph, metrics = _assemble(result.files, backends)
-        return cls(graph, root, skipped=result.skipped, metrics=metrics)
+        graph, total_refs = _assemble(result.files, backends)
+        return cls(graph, root, skipped=result.skipped, total_refs=total_refs)
 
     def find_definition(self, name: str) -> list[Definition]:
         return find_definition(self.graph, name)
@@ -178,8 +193,8 @@ class IndexSession:
         # keep the in-memory cache in step: drop deletions, fold in fresh parses.
         self._cache = {p: c for p, c in self._cache.items() if p in result.present}
         self._cache.update(result.fresh)
-        graph, metrics = _assemble(result.files, self._backends)
-        return Index(graph, self.root, skipped=result.skipped, metrics=metrics)
+        graph, total_refs = _assemble(result.files, self._backends)
+        return Index(graph, self.root, skipped=result.skipped, total_refs=total_refs)
 
     def patch(self) -> Index:
         """Re-ingest changed files and atomically swap in a fresh index; returns the new view."""
