@@ -30,6 +30,9 @@ class FakeBackend:
             symbols=[Symbol(sid, sid, SymbolKind.MODULE, Span(str(path), 1))],
         )
 
+    def finalize(self, files: Sequence[FileIndex]) -> list[FileIndex]:
+        return list(files)
+
     def resolve(self, files: Sequence[FileIndex]) -> ResolveResult:
         return ResolveResult(edges=[], externals=[])
 

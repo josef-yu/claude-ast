@@ -52,6 +52,16 @@ class Indexer(Protocol):
         """Parse in-memory source (the watcher path, source already in hand)."""
         ...
 
+    def finalize(self, files: Sequence[FileIndex]) -> list[FileIndex]:
+        """Cross-file post-pass over *all* this backend's files, run once at assembly before
+        symbols are added or refs resolved. Per-file ingest can't see the whole project, so this
+        is where a backend enforces global invariants its id scheme needs — e.g. making symbol ids
+        unique across files. Must be a pure, deterministic function of ``files``; return the same
+        objects unchanged when there is nothing to do (the identity is what keeps the incremental
+        cache warm). Backends with no cross-file concern return ``list(files)``.
+        """
+        ...
+
     def resolve(self, files: Sequence[FileIndex]) -> ResolveResult:
         """Bind this backend's raw references into resolved edges plus the external
         (library/stdlib) target nodes those edges reference.

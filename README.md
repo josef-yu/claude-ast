@@ -24,7 +24,9 @@ The **P1 engine and the P2 resolver stack are complete**, validated on the Djang
 source tree (~17.7k symbols in the `django/` package; warm re-index ~0.3s). The
 **P3 delivery layer is complete too**: the **MCP server** (`claude-ast-mcp`) serves
 the engine to Claude Code over stdio, and a **live watcher** keeps its index fresh
-as you edit. Nothing here calls an LLM — it's fully deterministic and local.
+as you edit — each save re-resolves only the files a change actually affects
+(reverse-import + heuristic-name closure), not the whole project. Nothing here
+calls an LLM — it's fully deterministic and local.
 
 ## What it does
 
@@ -147,9 +149,9 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
   cross-file collision guard is dormant — 0 hits across Django's 17.7k symbols).
 - **P3 refinements** — persisting live-session edits back to the snapshot; **last-good-parse
   retention** (a mid-edit syntax error drops the file from the served view today — keep the
-  previous good parse, marked stale, until the file parses again); **incremental resolve on
-  patch** (a name→importers index so a change re-resolves only its dependents instead of the
-  global re-resolve, ~0.3s warm today); a rank cache invalidated on swap.
+  previous good parse, marked stale, until the file parses again). *(Incremental resolve on
+  patch and a swap-invalidated rank cache have landed — a save now re-resolves only the
+  reverse-import + heuristic-name closure of the change, and repo_map memoizes per graph.)*
 - **Second language** — a JS/TS backend. The seam is already built for it: `ast` is confined
   to `ingest/python/`, external ids are backend-owned, and tooling is partitioned under
   `tools/<language>/`.

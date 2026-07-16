@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..product import FileIndex, ResolveResult
 from .common import module_qualname
+from .finalize import ensure_unique_ids
 from .refs import extract_refs
 from .resolver import IncrementalResolver
 from .stubs import STDLIB_STUBS, StubProvider
@@ -66,6 +67,10 @@ class PythonIndexer:
         symbols, node_ids = extract_symbols(tree, module, path)
         refs, imports = extract_refs(tree, module, path, node_ids)
         return FileIndex(path=path, module=module, symbols=symbols, refs=refs, imports=imports)
+
+    def finalize(self, files: Sequence[FileIndex]) -> list[FileIndex]:
+        """Make symbol ids globally unique before assembly (per-file ``#N`` extended cross-file)."""
+        return ensure_unique_ids(files)
 
     def resolve(self, files: Sequence[FileIndex]) -> ResolveResult:
         """Bind raw references to symbol ids, emitting SYNTACTIC/high-confidence edges plus the

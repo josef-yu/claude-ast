@@ -59,11 +59,14 @@ def _assemble(
     summary itself is derived lazily by ``Index.metrics``, off the serving and patch paths.
     """
     graph = Graph()
-    for fi in files:
-        for symbol in fi.symbols:
-            graph.add_symbol(symbol)
     for backend in backends:
         backend_files = [fi for fi in files if Path(fi.path).suffix in backend.extensions]
+        # Cross-file finalization (e.g. globally-unique ids) before symbols are added or refs
+        # resolved — the products the graph and the resolver both see must be the finalized ones.
+        backend_files = backend.finalize(backend_files)
+        for fi in backend_files:
+            for symbol in fi.symbols:
+                graph.add_symbol(symbol)
         resolved = backend.resolve(backend_files)
         for external in resolved.externals:
             graph.add_external(external)
