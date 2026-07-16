@@ -36,7 +36,7 @@ def _definition(index: Index, name: str) -> list[dict]:
     ]
 
 
-def _outline(index: Index, module: str) -> list[dict]:
+def _outline(index: Index, module: str, focus: str | None = None) -> list[dict]:
     return [
         {
             "id": e.id,
@@ -45,8 +45,9 @@ def _outline(index: Index, module: str) -> list[dict]:
             "depth": e.depth,
             "signature": e.signature,
             "doc": e.doc,
+            "focus": e.id == focus,
         }
-        for e in index.outline(module)
+        for e in index.outline(module, focus)
     ]
 
 
@@ -75,9 +76,13 @@ def build_server(session: IndexSession) -> FastMCP:
         return _definition(session.current, name)
 
     @mcp.tool()
-    def outline(module: str) -> list[dict]:
-        """A module's own symbols in source order, each with a nesting `depth` and signature."""
-        return _outline(session.current, module)
+    def outline(module: str, focus: str | None = None) -> list[dict]:
+        """A module's symbols, each with a nesting `depth` and signature. Child submodules are
+        collapsed leaves (a table-of-contents); pass `focus` (a symbol id under the module) to
+        expand the submodule containing it and reveal the neighbourhood around it (its entry is
+        flagged `focus: true`). A `focus` that isn't a symbol under `module` is ignored, yielding
+        the plain shallow outline."""
+        return _outline(session.current, module, focus)
 
     @mcp.tool()
     def find_callers(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:

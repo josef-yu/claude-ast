@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 18  # spanned submodule-import candidate refs + inference rebinding guard
+_SCHEMA_VERSION = 19  # module symbols carry their package as parent (module-tree adjacency)
 
 
 class SqliteStore(Store):

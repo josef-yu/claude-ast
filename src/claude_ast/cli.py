@@ -68,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     p_outline = sub.add_parser("outline", help="list a module's symbols")
     p_outline.add_argument("module", help="module id, e.g. pkg.mod")
     p_outline.add_argument("path", nargs="?", default=".", help="project root (default: .)")
+    p_outline.add_argument(
+        "--focus", default=None,
+        help="a symbol id under the module — expand the submodule containing it to reveal its "
+        "neighbourhood (submodules are collapsed leaves otherwise). An id not under the module "
+        "(or a typo) is ignored: you get the plain shallow outline.",
+    )
 
     p_callers = sub.add_parser("callers", help="who calls a symbol")
     p_callers.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
@@ -101,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "def":
         return _cmd_def(args.name, Path(args.path))
     if args.command == "outline":
-        return _cmd_outline(args.module, Path(args.path))
+        return _cmd_outline(args.module, Path(args.path), args.focus)
     if args.command == "callers":
         return _cmd_relations(
             args.symbol, Path(args.path), "callers", args.min_confidence, args.source, args.context
@@ -173,12 +179,12 @@ def _cmd_def(name: str, root: Path) -> int:
     return 0
 
 
-def _cmd_outline(module: str, root: Path) -> int:
+def _cmd_outline(module: str, root: Path, focus: str | None = None) -> int:
     if not root.exists():
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
-    entries = Index.build(root).outline(module)
+    entries = Index.build(root).outline(module, focus)
     if not entries:
         print(f"no module {module!r} in the index", file=sys.stderr)
         return 1
@@ -186,7 +192,8 @@ def _cmd_outline(module: str, root: Path) -> int:
         indent = "  " * e.depth
         label = e.signature or f"{e.kind} {e.name}"
         doc = f"    # {e.doc}" if e.doc else ""
-        print(f"{indent}{label}{doc}")
+        here = "    <<< focus" if e.id == focus else ""
+        print(f"{indent}{label}{doc}{here}")
     return 0
 
 

@@ -14,7 +14,6 @@ contribution slot back into that order verbatim during a patch.
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -31,8 +30,6 @@ from .typeres import (
     resolve_intree_chains,
     resolve_value_types,
 )
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -54,22 +51,6 @@ def _base_tables(files: Sequence[FileIndex]) -> _Tables:
         reexports={fi.module: fi.imports for fi in files},
         module_defs=module_defs_map(files),
     )
-
-
-def _warn_ambiguous_modules(files: Sequence[FileIndex]) -> None:
-    """Surface an invalid layout where two files share a module qualname (e.g. ``pkg.py`` beside
-    ``pkg/__init__.py``). The resolver keys per-module tables by that qualname, so a collision
-    collapses them — but it is a layout Python itself rejects, so we warn rather than support it."""
-    seen: set[str] = set()
-    dupes: set[str] = set()
-    for fi in files:
-        (dupes if fi.module in seen else seen).add(fi.module)
-    if dupes:
-        logger.warning(
-            "ambiguous module name(s) %s — multiple files map to one qualname (a package and a "
-            "same-named module?); their edges may be dropped or misresolved",
-            sorted(dupes),
-        )
 
 
 @dataclass(slots=True)
@@ -168,8 +149,6 @@ def _resolve_files(
     (their edges are unaffected by the patch — see ``_dirty_set``). ``ResolveIndex`` is still built
     over *all* files each call, so a clean file's reused value edges see the same tables a full
     resolve would, keeping the result byte-identical."""
-    if dirty is None:  # full pass — the one place to surface an invalid same-qualname layout
-        _warn_ambiguous_modules(files)
     t = _base_tables(files)
 
     def stale(module: str) -> bool:

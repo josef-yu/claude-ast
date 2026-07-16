@@ -113,13 +113,15 @@ def render_repo_map(entries: list[RepoMapEntry]) -> str:
 
 
 def _module_and_depth(graph: Graph, sym: Symbol) -> tuple[SymbolId, int]:
-    """Walk parents to the owning module, counting hops — the neutral replacement
-    for parsing dotted ids. The topmost ancestor is the module; the hop count is
-    the symbol's nesting depth within it (indentation for the skeleton).
+    """Walk parents to the owning module, counting hops — the neutral replacement for parsing
+    dotted ids. Stops at the nearest ``MODULE`` ancestor (the symbol's *own* module), NOT the
+    topmost ancestor: with the module-tree adjacency a submodule's topmost ancestor is its
+    package, but a member belongs to its submodule. The hop count is the nesting depth within
+    that module (indentation for the skeleton).
     """
     cur = sym
     depth = 0
-    while cur.parent is not None:
+    while cur.kind is not SymbolKind.MODULE and cur.parent is not None:
         parent = graph.symbol(cur.parent)
         if parent is None:
             break

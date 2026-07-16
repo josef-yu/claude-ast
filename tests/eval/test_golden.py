@@ -59,11 +59,11 @@ def test_a_local_shadow_does_not_forge_a_caller(index: Index) -> None:
     assert "sample_pkg.core.shadowed" not in callers
 
 
-def test_outline_excludes_submodules(index: Index) -> None:
+def test_outline_lists_submodules_as_collapsed_leaves(index: Index) -> None:
     ids = {e.id for e in index.outline("sample_pkg")}
-    assert "sample_pkg.VERSION" in ids       # the package's own member
-    assert "sample_pkg.core" not in ids       # a submodule, not a member
-    assert "sample_pkg.core.hub" not in ids   # nor a submodule's contents
+    assert "sample_pkg.VERSION" in ids       # the package's own member, shown
+    assert "sample_pkg.core" in ids          # a submodule — named as a table-of-contents leaf...
+    assert "sample_pkg.core.hub" not in ids  # ...but not descended into (its contents stay hidden)
 
 
 def test_same_qualname_collision_is_preserved(index: Index) -> None:

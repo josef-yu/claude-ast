@@ -79,7 +79,7 @@ Every edge is tiered `definite` or `possible` and tagged with how it was found, 
 claude-ast index <path>              # build/update the index; print a summary
 claude-ast status <path>             # index freshness (cold vs. warm snapshot)
 claude-ast def <name> [path]         # where a name is defined
-claude-ast outline <module> [path]   # a module's symbols
+claude-ast outline <module> [path] [--focus <symbol>]   # a module's symbols (submodules collapsed)
 claude-ast callers <symbol> [path] [--min-confidence high|medium|low] [-s/--source]   # who calls a symbol
 claude-ast deps <symbol> [path] [--min-confidence high|medium|low] [-s/--source]      # what a symbol uses
 claude-ast importers <module> [path] [-s/--source]                                    # modules that import a module
@@ -90,6 +90,11 @@ claude-ast repo-map [path] [--focus <id>] [--budget N]
 "grep with no false positives," the follow-up read folded in. `importers` is the reverse of
 the module import graph (`import a` / `from a import x` / relative imports all resolved to one
 qualname) — the direction text search does worst.
+
+`outline` is shallow by default — a module's own definitions, with child submodules as
+collapsed one-line leaves (a package table-of-contents). `--focus <symbol>` (an id under the
+module) expands just the submodule containing it, revealing that symbol's neighbourhood while
+the rest stay collapsed; an id not under the module is ignored, so you get the plain outline.
 
 The index persists at `<root>/.claude-ast/index.db` (self-ignoring;
 `CLAUDE_AST_CACHE_DIR` relocates it centrally).

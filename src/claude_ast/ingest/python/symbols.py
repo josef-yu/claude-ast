@@ -44,13 +44,22 @@ def extract_symbols(
     always the exact id of its enclosing symbol — including the ``#N`` suffix of a
     same-qualname sibling, which a second traversal cannot reproduce on its own.
     """
+    package, _, name = module.rpartition(".")
     symbols: list[Symbol] = [
         Symbol(
             id=module,
-            name=module.rsplit(".", 1)[-1],
+            name=name,
             kind=SymbolKind.MODULE,
             span=Span(path, 1),
             doc=_docline(tree),
+            # A submodule/subpackage is a child of its package (``pkg.helpers`` -> ``pkg``): the
+            # module-tree adjacency the neutral layer walks instead of parsing the dotted id. The
+            # parent is the qualname prefix — a per-file, stable *guess* (no cross-file lookup here,
+            # so the incremental cache doesn't churn); ``None`` for a top-level module. When that
+            # prefix isn't itself a real module (a PEP 420 namespace-package gap, or a same-named
+            # non-module in the parent ``__init__``), ``finalize`` corrects it cross-file to the
+            # nearest real package.
+            parent=package or None,
         )
     ]
     node_ids: dict[ast.AST, str] = {}

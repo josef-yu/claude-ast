@@ -135,8 +135,8 @@ class Index:
     def find_definition(self, name: str) -> list[Definition]:
         return find_definition(self.graph, name)
 
-    def outline(self, module: str) -> list[OutlineEntry]:
-        return outline(self.graph, module)
+    def outline(self, module: str, focus: str | None = None) -> list[OutlineEntry]:
+        return outline(self.graph, module, focus)
 
     def find_callers(
         self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..model import Graph, Span, Symbol, SymbolId
+from ..model import Graph, Span, Symbol, SymbolId, SymbolKind
 
 
 @dataclass(slots=True)
@@ -51,16 +51,28 @@ def find_definition(graph: Graph, name: str) -> list[Definition]:
     return [Definition(s.id, s.kind.value, s.span, s.signature) for s in matches]
 
 
-def outline(graph: Graph, module: SymbolId) -> list[OutlineEntry]:
-    """A module's own symbols, in source order, with nesting depth for indentation.
+def outline(
+    graph: Graph, module: SymbolId, focus: SymbolId | None = None
+) -> list[OutlineEntry]:
+    """A module's symbols with nesting depth for indentation (own members in source order,
+    submodule leaves in file-discovery order) — **shallow by
+    default, revealing the area around a focus on demand**.
 
-    Walks the structural tree from the module down through its members (a class's
-    methods nest one deeper), so a *sub*module — a separate root that merely
-    shares an id prefix — is correctly excluded, not swept in by a string match.
+    A module's own definitions are shown in full (a class's methods nest one deeper). A child
+    *sub*module is normally a **collapsed leaf** — one line naming it, a table-of-contents entry —
+    so ``outline(pkg)`` stays a readable overview even for a large package instead of dumping its
+    whole subtree.
+
+    Given a ``focus`` symbol somewhere under ``module``, the single branch on the path to it is
+    **expanded** to its whole submodule, revealing the focus's structural neighbourhood (its
+    siblings, its own members) while every other submodule stays collapsed — progressive
+    disclosure: shallow context everywhere, detail where you're working. A ``focus`` that is not a
+    symbol under ``module`` (a typo, or an out-of-subtree id) simply yields the shallow view.
     """
     root = graph.symbol(module)
     if root is None:
         return []
+    reveal = _reveal_spine(graph, focus, module) if focus is not None else frozenset()
     entries: list[OutlineEntry] = []
 
     def walk(sym: Symbol, depth: int) -> None:
@@ -68,7 +80,30 @@ def outline(graph: Graph, module: SymbolId) -> list[OutlineEntry]:
             OutlineEntry(sym.id, sym.name, sym.kind.value, sym.signature, sym.doc, depth)
         )
         for child in graph.children(sym.id):
-            walk(child, depth + 1)
+            if child.kind is SymbolKind.MODULE and child.id not in reveal:
+                # a submodule off the focus path — a collapsed table-of-contents leaf, not descended
+                entries.append(
+                    OutlineEntry(
+                        child.id, child.name, child.kind.value,
+                        child.signature, child.doc, depth + 1,
+                    )
+                )
+            else:
+                walk(child, depth + 1)  # own member, or the submodule on the path to the focus
 
     walk(root, 0)
     return entries
+
+
+def _reveal_spine(graph: Graph, focus: SymbolId, module: SymbolId) -> frozenset[SymbolId]:
+    """The ids from ``focus`` up to ``module`` (inclusive) — the branch ``outline`` expands. Empty
+    when ``focus`` is not a symbol under ``module`` (an unknown or out-of-subtree id), so the caller
+    degrades to the shallow view rather than erroring."""
+    spine: set[SymbolId] = set()
+    cur = graph.symbol(focus)
+    while cur is not None:
+        spine.add(cur.id)
+        if cur.id == module:
+            return frozenset(spine)
+        cur = graph.symbol(cur.parent) if cur.parent is not None else None
+    return frozenset()
