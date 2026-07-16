@@ -62,15 +62,18 @@ Every edge is tiered `definite` or `possible` and tagged with how it was found, 
 
 | Tier | Source | Resolves |
 |------|--------|----------|
-| `definite` | syntactic | direct calls, imports (absolute · relative · package re-exports), inheritance |
+| `definite` | syntactic | direct calls & attribute reads, imports (absolute · relative · package re-exports), inheritance |
 | `definite` | external | library/stdlib targets as `external` nodes — from-import calls, module-rooted attributes (`os.path.join`), builtins (`len`); kept out of ranking |
 | `definite` | call-site | `RECEIVES_ARG` — the concrete type flowing into a parameter (`g(User())` → `g` receives `User`); an observation, never a dispatch claim |
-| `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` → the member, followed cross-file through bases and re-exports |
+| `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` / `self.attr` → the member (called *or* read), followed cross-file through bases and re-exports |
 | `possible` | stub | members on external **stdlib** types (`p: Path; p.exists()`), from a frozen, generated member table |
 | `possible` | heuristic | name-match for untyped receivers, capped so an over-common name stays silent |
 
-`claude-ast index` reports the coverage and tier/source split it achieves (on its own
-`src/`: ~74% of references bound). Consumers dial the floor with `--min-confidence`
+Both a method call and a bare **attribute read** (`obj.attr` with no call) flow through this one
+ladder: a call emits a `CALL` edge restricted to callable targets, a read emits a `REFERENCE`
+edge that may also land on a data attribute — so `find_references` now sees pure reads, not just
+calls. `claude-ast index` reports the coverage and tier/source split it achieves (on its own
+`src/`: ~72% of references bound). Consumers dial the floor with `--min-confidence`
 (default `medium`) — the reliable set by default, the `low` heuristics only on demand.
 
 ## CLI
@@ -134,10 +137,6 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
   local assignments (`x: User = ...`) and per-use flow sensitivity (rebinding drops the type
   today rather than tracking it); a decorator-aware fix for the `@staticmethod`-named-`self`
   edge.
-- **Attribute-read edges** — calls, imports, inheritance, and arg observations are the only
-  edge kinds emitted today; a bare attribute read (`obj.attr` with no call) yields nothing,
-  so `find_references` under-reports pure reads. Emit `REFERENCE` edges through the same
-  receiver ladder, carrying the same tiers.
 - **Framework-convention rungs** — Django-aware resolution the generic ladder can't see: the
   manager convention (`Model.objects…`), celery task attributes (`fn.delay(…)` → the task
   function), router `register(…)` / `as_view()` targets. Convention-based, so `possible` at

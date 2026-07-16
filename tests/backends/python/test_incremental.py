@@ -168,6 +168,52 @@ def test_rename_of_heuristic_target_reresolves_untyped_non_importer(tmp_path):
     assert any(r.id == "b.use" for r in gadget)
 
 
+def test_rename_of_read_heuristic_target_reresolves_untyped_reader(tmp_path):
+    # Regression for attribute-read edges: a bare read `x.color` on an untyped receiver name-matches
+    # every readable `*.color` member — including a class *variable*, which the old method-only id
+    # tracking ignored. Renaming the class that owns `color` changes the matched member's id, so the
+    # dirty set must track readable-member ids (not just methods) or the cached read edge dangles.
+    for rel, src in _PAD.items():
+        (tmp_path / rel).write_text(src)
+    (tmp_path / "a.py").write_text("class Widget:\n    color = 'red'\n")  # a data attribute
+    (tmp_path / "b.py").write_text("def show(x):\n    return x.color\n")  # a read, imports nothing
+    session = IndexSession(tmp_path)
+    refs = session.current.find_references("a.Widget.color", Confidence.LOW)
+    # the read edge reaches the non-importer via the heuristic name-match:
+    assert any(r.id == "b.show" and r.kind == "reference" for r in refs)
+
+    (tmp_path / "a.py").write_text("class Gadget:\n    color = 'red'\n")  # count-preserving rename
+    session.patch()
+    fresh = Index.build(tmp_path, use_store=False)
+    assert _canonical(session.current) == _canonical(fresh)
+    # the stale target is gone, the new one is bound
+    assert session.current.find_references("a.Widget.color", Confidence.LOW) == []
+    gadget = session.current.find_references("a.Gadget.color", Confidence.LOW)
+    assert any(r.id == "b.show" for r in gadget)
+
+
+@pytest.mark.parametrize("method_first", [True, False])
+def test_kind_flip_of_a_heuristic_target_reresolves_untyped_callers(tmp_path, method_first):
+    # Regression: a symbol id does NOT encode kind, so a same-qualname flip between a METHOD and a
+    # VARIABLE (`def foo` <-> `foo = 1`) keeps the id but moves the member between heuristic pools —
+    # it leaves the METHOD-only *call* pool while staying in the *read* pool. The dirty-set's
+    # member tracking must key on (id, kind), not id alone, or a non-importing untyped `obj.foo()`
+    # caller keeps a cached CALL edge to what is now a data attribute (incremental != full rebuild).
+    for rel, src in _PAD.items():
+        (tmp_path / rel).write_text(src)
+    method = "class C:\n    def foo(self):\n        return 1\n"
+    variable = "class C:\n    foo = 1\n"
+    (tmp_path / "a.py").write_text(method if method_first else variable)
+    # b calls foo() on an untyped receiver and imports nothing -> reachable only via the heuristic:
+    (tmp_path / "b.py").write_text("def use(obj):\n    return obj.foo()\n")
+    session = IndexSession(tmp_path)
+
+    (tmp_path / "a.py").write_text(variable if method_first else method)  # the kind flip
+    session.patch()
+    fresh = Index.build(tmp_path, use_store=False)
+    assert _canonical(session.current) == _canonical(fresh)
+
+
 def test_deleting_an_imported_module_reresolves_its_importers(tmp_path):
     # Regression: deleting a module must re-resolve files that imported it (its edges to the gone
     # symbols must drop) — exercises the `deleted` set + reverse-import closure on the patch path.

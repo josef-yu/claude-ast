@@ -140,6 +140,46 @@ def test_call_site_reports_the_passed_type_as_a_definite_observation(index: Inde
     assert ("sample_pkg.service.consume", "receives-arg") in refs
 
 
+def test_self_attribute_read_resolves_to_a_data_attribute_as_possible(index: Index) -> None:
+    # `self.label` (a bare read, no call) in Widget.title -> the class's own data attribute, a
+    # REFERENCE at the possible tier. A read can land on a VARIABLE, where a call could not.
+    deps = {
+        (d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.reads.Widget.title")
+    }
+    assert ("sample_pkg.reads.Widget.label", "reference", "possible") in deps
+
+
+def test_annotated_attribute_read_resolves_to_the_typed_member(index: Index) -> None:
+    # `w: Widget` -> `w.label` binds to Widget.label as a possible-tier REFERENCE (annotation).
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.reads.describe")}
+    assert ("sample_pkg.reads.Widget.label", "reference", "possible") in deps
+
+
+def test_name_rooted_read_binds_a_module_variable_as_definite(index: Index) -> None:
+    # `core.BASE_LIMIT` (a bare read of an in-tree module variable) -> a definite REFERENCE. The
+    # reverse view gives a module variable's readers — a relationship text search cannot cheaply do.
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.reads.ceiling")}
+    assert ("sample_pkg.core.BASE_LIMIT", "reference", "definite") in deps
+    refs = {(r.id, r.kind) for r in index.find_references("sample_pkg.core.BASE_LIMIT")}
+    assert ("sample_pkg.reads.ceiling", "reference") in refs
+
+
+def test_untyped_attribute_read_name_matches_via_heuristic(index: Index) -> None:
+    # `obj.label` on an untyped receiver -> a LOW name-match, below the default floor.
+    assert index.find_dependencies("sample_pkg.reads.sniff") == []
+    deps = {
+        (d.id, d.kind, d.tier)
+        for d in index.find_dependencies("sample_pkg.reads.sniff", Confidence.LOW)
+    }
+    assert ("sample_pkg.reads.Widget.label", "reference", "possible") in deps
+    edge = next(
+        e
+        for e in index.graph.out_edges("sample_pkg.reads.sniff")
+        if e.dst == "sample_pkg.reads.Widget.label"
+    )
+    assert edge.resolution.source.value == "heuristic"
+
+
 def test_stub_resolves_a_member_on_an_external_type(index: Index) -> None:
     # normalize(name: str) -> `name.upper()` binds to the stdlib stub `builtins.str.upper`,
     # a possible-tier edge to an EXTERNAL node (member existence, not dispatch).
@@ -230,3 +270,12 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
 
     assert str_stub(cold_index) == {"builtins.str.upper"}
     assert str_stub(warm_index) == {"builtins.str.upper"}
+
+    # ...and the attribute-read REFERENCE edges, reproduced only if the new REFERENCE refs survive
+    # the round-trip (they reuse local_root/receiver_type — no new field, just a new ref kind).
+    def readers(index: Index, sym: str) -> set[str]:
+        return {r.id for r in index.find_references(sym) if r.kind == "reference"}
+
+    limit_readers = {"sample_pkg.reads.ceiling"}
+    assert readers(cold_index, "sample_pkg.core.BASE_LIMIT") == limit_readers
+    assert readers(warm_index, "sample_pkg.core.BASE_LIMIT") == limit_readers

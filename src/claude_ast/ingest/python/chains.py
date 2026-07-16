@@ -39,10 +39,18 @@ def _member(typ: str, name: str, stubs: StubProvider) -> tuple[str, str] | None:
     return (kind, typ if result == _SELF else result)
 
 
-def resolve_external_chain(dotted: str, stubs: StubProvider) -> str | tuple[str, str] | None:
-    """Decide an external CALL chain. Returns ``"keep"`` (emit the definite external edge
+def resolve_external_chain(
+    dotted: str, stubs: StubProvider, is_call: bool = True
+) -> str | tuple[str, str] | None:
+    """Decide an external CALL or READ chain. Returns ``"keep"`` (emit the definite external edge
     unchanged), ``("stub", target)`` (emit a MEDIUM/STUB edge to the value-type member instead),
-    or ``None`` (decline — the member is type-dependent and unconfirmable, e.g. #2)."""
+    or ``None`` (decline — the member is type-dependent and unconfirmable, e.g. #2).
+
+    ``is_call`` governs the one place the two diverge: the terminal member of a *module value*
+    (``os.EX_OK``). *Calling* it is type-dependent (the value's ``__call__`` is unknown) so a call
+    declines; *reading* it is a definite reference to that module member, so a read KEEPs. Every
+    other rung — module facts, submodules, and members reached on a value's *type* — is identical
+    (a value-type member stays a MEDIUM/STUB edge whether it is then called or merely read)."""
     parts = dotted.split(".")
     if not stubs.has_module(parts[0]):
         return KEEP  # no shape data for this library -> leave the definite edge as-is
@@ -59,9 +67,10 @@ def resolve_external_chain(dotted: str, stubs: StubProvider) -> str | tuple[str,
                 return KEEP  # unknown module attribute -> a definite module fact, don't regress
             kind, typ = member
             if kind in ("func", "class") and last:
-                return KEEP  # calling a module function / constructing a class -> definite external
+                return KEEP  # a module function / class -> definite external (called or read)
             if kind == "value" and last:
-                return None  # calling a module-level value -> type-dependent, decline
+                # read a module value -> definite reference; call it -> type-dependent, decline.
+                return None if is_call else KEEP
             state, ref = _advance(kind, typ, f"{ref}.{comp}", stubs)
         elif state == "type":
             member = _member(ref, comp, stubs)

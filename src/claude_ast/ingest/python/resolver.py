@@ -104,11 +104,13 @@ def _syntactic_file(
         if bound is None:
             continue
         dst, is_external = bound
-        # An external CALL chain that crosses into a value (`sys.stdout.getvalue`) is not a
+        # An external CALL/READ chain that crosses into a value (`sys.stdout.getvalue`) is not a
         # definite module fact — walk it through the typeshed tables to keep the module-fact
-        # prefix definite, downgrade a value member to a possible STUB edge, or decline it.
-        if is_external and ref.kind is EdgeKind.CALL and "." in dst:
-            decision = resolve_external_chain(dst, stubs)
+        # prefix definite, downgrade a value member to a possible STUB edge, or decline it. A read
+        # of a *module-level* value (`os.EX_OK`) stays definite where a call would decline — the
+        # one place the read/call decision diverges (``is_call``).
+        if is_external and ref.kind in (EdgeKind.CALL, EdgeKind.REFERENCE) and "." in dst:
+            decision = resolve_external_chain(dst, stubs, is_call=ref.kind is EdgeKind.CALL)
             if decision is None:
                 continue  # type-dependent member we can't confirm -> report nothing
             if decision is not KEEP:
@@ -199,12 +201,13 @@ def reassemble(files: Sequence[FileIndex], recs: dict[SymbolId, FileEdges]) -> R
 #   1. imports — every resolver binds a ref through the file's own defs/imports, so a
 #      cross-module reference must be imported. A change to module M can only affect files that
 #      (transitively, through re-export chains) import M -> the reverse-import closure.
-#   2. the heuristic name-match — an untyped ``obj.m()`` binds to every in-tree ``*.m`` method
-#      with no import, one LOW edge per candidate in candidate order. So ANY change to the global
-#      ``m`` population — add/remove, crossing the ambiguity cap, OR a rename/move/reorder that
-#      changes a candidate's *id* or *position* at constant count — flips those edges in every
-#      file with an untyped ``.m()`` call. We therefore track each name's ordered id-tuple, not
-#      just its count (a count proxy silently misses rename/move/reorder -> stale/dangling edges).
+#   2. the heuristic name-match — an untyped ``obj.m()`` binds to every in-tree ``*.m`` method (a
+#      bare read ``obj.attr`` to every readable ``*.attr`` member) with no import, one LOW edge per
+#      candidate in candidate order. So ANY change to the global ``m`` population — add/remove,
+#      crossing the ambiguity cap, OR a rename/move/reorder/kind-flip that changes a candidate's
+#      *id*, *kind*, or *position* at constant count — flips those edges in every file with an
+#      untyped ``.m()`` call or ``.m`` read. We therefore track each name's ordered ``(id, kind)``
+#      tuple, not its count/id alone (a weaker proxy silently misses these -> stale/dangling edges).
 # The "dirty" set is the changed files plus both closures; every other file's cached edges are
 # reused verbatim. A wrong (too-small) dirty set would silently corrupt the graph, so the
 # incremental==full fuzz test is the load-bearing guard, and we fall back to a full resolve
@@ -226,15 +229,36 @@ def _surface(fi: FileIndex) -> tuple:
     return shape, tuple(sorted(fi.imports.items()))
 
 
-def _method_ids(fi: FileIndex) -> dict[str, tuple[SymbolId, ...]]:
-    """Method name -> the ids of every method with that name in this file, in symbol order — the
-    file's ordered contribution to the global name-match population. A heuristic edge binds to
-    these ids in this order, so comparing the id-tuple (not just its length) is what catches a
-    rename/move/reorder that changes a candidate's id or position at constant count."""
-    ids: dict[str, list[SymbolId]] = {}
+# Class-member kinds a heuristic edge can bind to: a value CALL matches a METHOD; a bare attribute
+# READ matches any readable member (a data VARIABLE or nested CLASS too). Tracking the read superset
+# covers the call pool as well. Mirrors ``typeres._READABLE`` for class members, kept local so the
+# incremental dirty-set doesn't reach into the resolver's internals.
+_HEURISTIC_MEMBER_KINDS = frozenset(
+    {SymbolKind.METHOD, SymbolKind.VARIABLE, SymbolKind.CLASS}
+)
+
+
+def _attr_ids(fi: FileIndex) -> dict[str, tuple[tuple[SymbolId, str], ...]]:
+    """Class-member name -> the ordered ``(id, kind)`` of every readable member with that name in
+    this file — the file's contribution to the global heuristic name-match population. A value CALL
+    name-matches methods; a bare-read REFERENCE name-matches any readable member, so tracking the
+    wider read pool (methods + variables + nested classes) also covers the call pool. Comparing the
+    tuple (not just its length) catches a rename/move/reorder that changes a candidate's id or
+    position at constant count — a stale cached heuristic edge otherwise.
+
+    ``kind`` is part of the tracked tuple, not just ``id``, because a symbol id does NOT encode
+    kind: a same-qualname flip between a METHOD and a VARIABLE/nested CLASS (``def foo`` -> ``foo =
+    1``) keeps the id but changes which heuristic pool the member is in — it *leaves* the
+    METHOD-only call pool while staying in the read pool. Without the kind, that flip is invisible,
+    so a non-importing untyped ``obj.foo()`` caller keeps a cached call edge to what is now a data
+    attribute (a real incremental != full divergence). Only members whose parent is a class in
+    *this* file count (a class's members live beside it), matching the ``attrs_by_name`` pool the
+    read heuristic actually consults."""
+    classes = {s.id for s in fi.symbols if s.kind is SymbolKind.CLASS}
+    ids: dict[str, list[tuple[SymbolId, str]]] = {}
     for s in fi.symbols:
-        if s.kind is SymbolKind.METHOD:
-            ids.setdefault(s.name, []).append(s.id)
+        if s.kind in _HEURISTIC_MEMBER_KINDS and s.parent in classes:
+            ids.setdefault(s.name, []).append((s.id, s.kind.value))
     return {name: tuple(v) for name, v in ids.items()}
 
 
@@ -257,8 +281,10 @@ def _dep_modules(fi: FileIndex) -> set[str]:
 
 
 def _untyped_method_names(fi: FileIndex) -> set[str]:
-    """Method names this file calls on an *untyped* receiver — the ones the heuristic resolver
-    would name-match, so a change to their global population must re-resolve this file."""
+    """Attribute names this file uses on an *untyped* receiver — a call (``obj.m()``) OR a bare read
+    (``obj.attr``), both left to the heuristic resolver. Kind-agnostic on purpose: a change to
+    either name's global member population must re-resolve this file, so both channels are tracked
+    the same way (the read pool that ``_attr_ids`` tracks is a superset of the call pool)."""
     names: set[str] = set()
     for ref in fi.refs:
         if ref.local_root and ref.receiver_type is None:
@@ -282,16 +308,17 @@ def _dirty_set(
             prior = old.get(fi.module)
             if prior is None or _surface(prior) != _surface(fi):
                 surface_changed.add(fi.module)
-    # (2) method names whose id-tuple changed anywhere (add/remove/rename/move/reorder) can flip
-    #     the heuristic edges bound to those ids, so re-resolve every untyped caller of the name.
+    # (2) member names whose (id, kind)-tuple changed anywhere (add/remove/rename/move/reorder/
+    #     kind-flip) can flip the heuristic edges bound to them, so re-resolve every untyped
+    #     caller/reader of the name.
     changed_names: set[str] = set()
     for fi in files:
         if fi.module in changed:
-            new_c = _method_ids(fi)
-            old_c = _method_ids(old[fi.module]) if fi.module in old else {}
+            new_c = _attr_ids(fi)
+            old_c = _attr_ids(old[fi.module]) if fi.module in old else {}
             changed_names |= {n for n in set(new_c) | set(old_c) if new_c.get(n) != old_c.get(n)}
     for m in deleted:
-        changed_names |= set(_method_ids(old[m]))
+        changed_names |= set(_attr_ids(old[m]))
 
     dirty = set(changed)
     # reverse-import closure over the (transitive) import graph.

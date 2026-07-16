@@ -2,9 +2,14 @@
 
 Emits the syntactically-meaningful references:
 
-- ``CALL``     — a call whose callee is a name (``foo()``) or an attribute chain
+- ``CALL``      — a call whose callee is a name (``foo()``) or an attribute chain
   rooted at a name (``os.path.join()``)
-- ``INHERITS`` — a class base that is such a name or attribute chain (``abc.ABC``)
+- ``REFERENCE`` — a bare attribute *read* (``obj.attr`` with no call): the same
+  attribute forms as a callee, but *loaded* as a value rather than invoked. It flows
+  through the identical receiver ladder as a call (name-rooted -> syntactic binding;
+  value-rooted ``self.attr`` / ``u.attr`` -> the type resolvers), only it can land on a
+  data attribute, not just a callable. Store/Del targets are not reads and are skipped.
+- ``INHERITS``  — a class base that is such a name or attribute chain (``abc.ABC``)
 
 plus a module-level *import map* (local name -> target qualname) used later to
 bind names that came from another module. Attribute chains rooted at a *local*
@@ -218,26 +223,65 @@ def _visit(
                         receiver_inferred=rinferred,
                     )
                 )
-        else:
-            # callee rooted at a *value*, not a name. One case we can still resolve: a call whose
-            # receiver is itself a name-rooted call, `re.compile(p).match(s).group()` — record the
-            # receiver call (`re.compile`) + the ordered members reached on its return
-            # (`("match", "group")`) for the chain resolver.
-            chain = _call_chain(node)
-            if chain is not None:
-                receiver, members = chain
-                if not _local(receiver.partition(".")[0], locals_):
-                    refs.append(RawRef(
-                        enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members
-                    ))
-                elif "." in receiver:
-                    # value-rooted chain (`self.get().run()`): the receiver is a value-typed call,
-                    # so the type resolvers own it — flagged, with the receiver's type when known.
-                    rtype, rinferred = types.get(receiver.partition(".")[0], (None, False))
-                    refs.append(RawRef(
-                        enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members,
-                        local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
-                    ))
+            # The callee is a flat dotted name — pure Name/Attribute leaves, with no nested refs
+            # AND no bare read (it is *invoked*, not loaded). Recurse only into the arguments; NOT
+            # into ``node.func``, or the REFERENCE branch below would mis-capture the callee as a
+            # read (``os.path.join()`` must not also emit an ``os.path.join`` reference).
+            for child in ast.iter_child_nodes(node):
+                if child is not node.func:
+                    _visit(child, enclosing, path, refs, locals_, types, node_ids)
+            return
+        # Callee rooted at a *value*, not a name. One case we can still resolve: a call whose
+        # receiver is itself a name-rooted call, `re.compile(p).match(s).group()` — record the
+        # receiver call (`re.compile`) + the ordered members reached on its return
+        # (`("match", "group")`) for the chain resolver.
+        chain = _call_chain(node)
+        if chain is not None:
+            receiver, members = chain
+            if not _local(receiver.partition(".")[0], locals_):
+                refs.append(RawRef(
+                    enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members
+                ))
+            elif "." in receiver:
+                # value-rooted chain (`self.get().run()`): the receiver is a value-typed call,
+                # so the type resolvers own it — flagged, with the receiver's type when known.
+                rtype, rinferred = types.get(receiver.partition(".")[0], (None, False))
+                refs.append(RawRef(
+                    enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members,
+                    local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
+                ))
+        # A value-rooted callee has no flat dotted name, so recursing into ``node.func`` lets the
+        # REFERENCE branch descend it for nested calls (`re.compile(p)`) WITHOUT emitting a
+        # spurious read (its outermost attribute is value-rooted -> the descend-only path).
+        for child in ast.iter_child_nodes(node):
+            _visit(child, enclosing, path, refs, locals_, types, node_ids)
+        return
+
+    if isinstance(node, ast.Attribute):
+        # A bare attribute READ (`obj.attr` with no call). Reached only OUTSIDE a callee position
+        # (the Call branch owns and does not re-descend its callee), so this attribute is loaded as
+        # a value. Mirror the CALL machinery, but emit a REFERENCE — a read can land on a data
+        # attribute, not only a callable, so the resolver widens the member set for this kind.
+        dotted = _dotted_name(node)
+        if dotted is not None and isinstance(node.ctx, ast.Load):
+            root = dotted.partition(".")[0]
+            if not _local(root, locals_):
+                # name-rooted read (`os.path`, `models.User`) -> syntactic binding, like a call.
+                refs.append(RawRef(enclosing, EdgeKind.REFERENCE, dotted, span(path, node)))
+            elif "." in dotted:
+                # value receiver (`self.attr`, `u.attr`): the type resolvers own it, stamped with
+                # the receiver's type when known — exactly as a value-receiver CALL is.
+                rtype, rinferred = types.get(root, (None, False))
+                refs.append(RawRef(
+                    enclosing, EdgeKind.REFERENCE, dotted, span(path, node),
+                    local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
+                ))
+            return  # the whole dotted chain is one read — don't re-descend its own segments
+        # Value-rooted (`f().attr`) or a Store/Del target (not a read): descend into the receiver
+        # so nested calls/reads inside it are still captured; emit nothing for this attribute.
+        for child in ast.iter_child_nodes(node):
+            _visit(child, enclosing, path, refs, locals_, types, node_ids)
+        return
 
     for child in ast.iter_child_nodes(node):
         _visit(child, enclosing, path, refs, locals_, types, node_ids)

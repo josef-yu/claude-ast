@@ -48,8 +48,10 @@ class ResolveIndex:
     internal_roots: set[str]
     reexports: dict[str, dict[str, str]]
     module_defs: dict[str, dict[str, str]]  # module id -> {top-level name -> symbol id}
-    members: dict[SymbolId, dict[str, SymbolId]]
-    methods_by_name: dict[str, list[SymbolId]]
+    members: dict[SymbolId, dict[str, SymbolId]]  # callable members — for a CALL receiver
+    read_members: dict[SymbolId, dict[str, SymbolId]]  # + data attributes — for a READ receiver
+    methods_by_name: dict[str, list[SymbolId]]  # callable candidates — the CALL name-match
+    attrs_by_name: dict[str, list[SymbolId]]  # any readable class member — the READ name-match
     returns: dict[SymbolId, tuple[SymbolId, bool]]
     bases: dict[SymbolId, list[SymbolId]]
 
@@ -89,8 +91,10 @@ def resolution_index(
         internal_roots=internal_roots,
         reexports=reexports,
         module_defs=module_defs,
-        members=_members(files),
+        members=_members(files, _CALLABLE),
+        read_members=_members(files, _READABLE),
         methods_by_name=_methods_by_name(files),
+        attrs_by_name=_attrs_by_name(files, by_id),
         returns=_return_types(files, module_defs, reexports, by_id, all_ids),
         bases=_bases(edges, by_id),
     )
@@ -111,6 +115,12 @@ def resolve_value_types(
     - ``obj.m()`` with ``obj`` untyped -> a LOW name match to every ``*.m`` method
       (HEURISTIC), capped so an over-common name yields no edge rather than noise.
 
+    Handles both CALL refs and bare-attribute-READ (REFERENCE) refs through the *same* ladder,
+    with one difference: a read can land on a data attribute, so it looks members up in the wider
+    ``read_members`` / ``attrs_by_name`` maps (methods + variables + nested classes) and accepts any
+    stub member kind, where a call is restricted to callables. The edge carries ``ref.kind``, so a
+    read yields a REFERENCE edge and a call a CALL edge, both at the tier the rung dictates.
+
     The in-tree typed cases share one member lookup (own member, then in-tree bases) and
     produce exactly one MEDIUM edge; when in-tree resolution declines because the type is
     external, the stub provider is consulted for member existence, minting a MEDIUM STUB
@@ -122,6 +132,7 @@ def resolve_value_types(
     by_id, all_ids = ctx.by_id, ctx.all_ids
     reexports, internal_roots = ctx.reexports, ctx.internal_roots
     members, bases = ctx.members, ctx.bases
+    read_members, attrs_by_name = ctx.read_members, ctx.attrs_by_name
     methods_by_name, returns = ctx.methods_by_name, ctx.returns
 
     out: list[Edge] = []
@@ -162,6 +173,10 @@ def resolve_value_types(
             root, _, attr = ref.name.partition(".")
             if not attr or "." in attr:
                 continue  # single attribute only
+            # A READ (REFERENCE) can resolve to a data attribute, so it looks up in the wider
+            # member maps; a CALL stays restricted to callables. Same ladder, wider target set.
+            is_read = ref.kind is EdgeKind.REFERENCE
+            lookup_members = read_members if is_read else members
             if root == "self":
                 class_id = _self_class(ref.src, by_id)
                 resolution = Resolution.inferred()
@@ -188,7 +203,9 @@ def resolve_value_types(
                         all_ids, internal_roots, reexports,
                     )
                     member = stubs.type_member(ext, attr) if ext is not None else None
-                    if member is not None and member[0] in ("method", "func", "class"):
+                    # A call needs a callable member (`p.exists()`); a read accepts any member,
+                    # including a property/data attribute (`p.name`) that a call would decline.
+                    if member is not None and (is_read or member[0] in ("method", "func", "class")):
                         member_id = f"{ext}.{attr}"
                         externals.append(external_symbol(member_id))
                         out.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
@@ -201,14 +218,15 @@ def resolve_value_types(
             else:
                 # untyped receiver: last-resort name match, one LOW edge per candidate,
                 # but only when the name is specific enough (<= cap) to report, not spam.
-                candidates = methods_by_name.get(attr, ())
+                # A read matches any readable class member; a call only methods.
+                candidates = (attrs_by_name if is_read else methods_by_name).get(attr, ())
                 if 0 < len(candidates) <= _HEURISTIC_CAP:
                     for target in candidates:
                         out.append(Edge(ref.src, target, ref.kind, Resolution.heuristic(), ref.at))
                 continue
             if class_id is None:
                 continue
-            target = _member_lookup(class_id, attr, members, bases)
+            target = _member_lookup(class_id, attr, lookup_members, bases)
             if target is not None:
                 out.append(Edge(ref.src, target, ref.kind, resolution, ref.at))
     return out, externals
@@ -285,11 +303,31 @@ _HEURISTIC_CAP = 8
 
 
 def _methods_by_name(files: Sequence[FileIndex]) -> dict[str, list[SymbolId]]:
-    """method name -> the ids of every method with that name, in deterministic order."""
+    """method name -> the ids of every method with that name, in deterministic order — the CALL
+    heuristic's candidate pool (a value call dispatches to a method)."""
     by_name: dict[str, list[SymbolId]] = {}
     for fi in files:
         for sym in fi.symbols:
             if sym.kind is SymbolKind.METHOD:
+                by_name.setdefault(sym.name, []).append(sym.id)
+    return by_name
+
+
+def _attrs_by_name(
+    files: Sequence[FileIndex], by_id: dict[SymbolId, Symbol]
+) -> dict[str, list[SymbolId]]:
+    """attribute name -> the ids of every readable *class member* with that name, in deterministic
+    order — the READ heuristic's candidate pool. A bare ``obj.attr`` on an untyped receiver could
+    name any instance member: a method, a class-level variable, or a nested class. Module-level
+    defs are excluded (they aren't reachable as ``instance.attr``), so this is the read counterpart
+    of ``methods_by_name`` widened past callables, not a flat name index."""
+    by_name: dict[str, list[SymbolId]] = {}
+    for fi in files:
+        for sym in fi.symbols:
+            if sym.kind not in _READABLE or sym.parent is None:
+                continue
+            parent = by_id.get(sym.parent)
+            if parent is not None and parent.kind is SymbolKind.CLASS:
                 by_name.setdefault(sym.name, []).append(sym.id)
     return by_name
 
@@ -310,13 +348,22 @@ def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None
 # masking a same-named method.
 _CALLABLE = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION, SymbolKind.CLASS})
 
+# A bare attribute READ can land on any member, so its lookup adds the data attribute
+# (class-level VARIABLE) the call map deliberately omits: `obj.count` (a variable) IS a
+# valid read target, where `obj.count()` (a call) is not.
+_READABLE = _CALLABLE | {SymbolKind.VARIABLE}
 
-def _members(files: Sequence[FileIndex]) -> dict[SymbolId, dict[str, SymbolId]]:
-    """parent id -> {member name -> callable member id}, first-def wins (mirrors module_defs)."""
+
+def _members(
+    files: Sequence[FileIndex], kinds: frozenset[SymbolKind]
+) -> dict[SymbolId, dict[str, SymbolId]]:
+    """parent id -> {member name -> member id} for members whose kind is in ``kinds``, first-def
+    wins (mirrors module_defs). ``_CALLABLE`` builds the CALL map; ``_READABLE`` the wider READ
+    map. Only ever queried with a CLASS parent, so module-level entries are harmless ballast."""
     members: dict[SymbolId, dict[str, SymbolId]] = {}
     for fi in files:
         for sym in fi.symbols:
-            if sym.parent is not None and sym.kind in _CALLABLE:
+            if sym.parent is not None and sym.kind in kinds:
                 members.setdefault(sym.parent, {}).setdefault(sym.name, sym.id)
     return members
 
