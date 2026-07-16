@@ -94,6 +94,11 @@ claude-ast repo-map [path] [--focus <id>] [--budget N]
 the module import graph (`import a` / `from a import x` / relative imports all resolved to one
 qualname) — the direction text search does worst.
 
+A **mistyped id reads differently from a true empty answer**: `callers`/`deps`/`importers` on an
+unknown id report `no such symbol: 'X'  (did you mean: …?)` and exit `2`, while a real symbol that
+genuinely has none says `no callers of 'X'` and exits `1` — so an empty result is never a silent
+typo. The MCP relation tools return the same distinction structurally (`{found, results, suggestions}`).
+
 `outline` is shallow by default — a module's own definitions, with child submodules as
 collapsed one-line leaves (a package table-of-contents). `--focus <symbol>` (an id under the
 module) expands just the submodule containing it, revealing that symbol's neighbourhood while
@@ -141,9 +146,6 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
   manager convention (`Model.objects…`), celery task attributes (`fn.delay(…)` → the task
   function), router `register(…)` / `as_view()` targets. Convention-based, so `possible` at
   best — never dressed up as definite.
-- **Unknown id vs. zero results** — a mistyped or unknown symbol id currently reads exactly
-  like a true empty answer ("no callers"); report "no such symbol" distinctly, ideally with a
-  near-miss suggestion.
 - **importers scope** — function-scoped imports are excluded from the module graph by design
   (not a module-wide dependency), but they are real dependencies for impact analysis; add an
   opt-in flag that includes them, flagged as function-local.

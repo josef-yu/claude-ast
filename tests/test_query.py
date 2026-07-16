@@ -7,7 +7,7 @@ regardless of how the index was populated. A backend's end-to-end query pass
 """
 
 from claude_ast.model import Graph, Span, Symbol, SymbolKind
-from claude_ast.query import find_definition, outline
+from claude_ast.query import find_definition, lookup_symbol, outline
 
 
 def _sym(sid, name, kind, line, signature=None, doc=None, parent=None):
@@ -57,6 +57,43 @@ def test_outline_is_source_ordered_with_depth():
     assert depth["auth.User.save"] == 2
     order = [e.id for e in entries]
     assert order.index("auth.authenticate") < order.index("auth.User") < order.index("auth.Session")
+
+
+def test_lookup_symbol_known_in_tree_has_no_suggestions():
+    lk = lookup_symbol(_auth_graph(), "auth.User.save")
+    assert lk.known is True and lk.suggestions == []
+
+
+def test_lookup_symbol_unknown_suggests_by_exact_bare_name():
+    # a right leaf name under a wrong/absent qualifier -> suggest the qualified id(s), best signal
+    lk = lookup_symbol(_auth_graph(), "Session.save")
+    assert lk.known is False
+    assert set(lk.suggestions) == {"auth.User.save", "auth.Session.save"}
+
+
+def test_lookup_symbol_bare_name_is_unknown_but_suggests_the_qualified_id():
+    lk = lookup_symbol(_auth_graph(), "authenticate")
+    assert lk.known is False and lk.suggestions == ["auth.authenticate"]
+
+
+def test_lookup_symbol_typo_suggests_by_fuzzy_bare_name():
+    # no exact bare-name match for the typo -> fall back to a fuzzy match on the leaf name
+    lk = lookup_symbol(_auth_graph(), "auth.User.saev")
+    assert lk.known is False
+    assert "auth.User.save" in lk.suggestions
+
+
+def test_lookup_symbol_treats_an_external_as_known():
+    graph = _auth_graph()
+    graph.add_external(Symbol("os.getcwd", "getcwd", SymbolKind.EXTERNAL, Span("<external>", 0)))
+    lk = lookup_symbol(graph, "os.getcwd")
+    assert lk.known is True and lk.suggestions == []  # a valid find_references target
+
+
+def test_lookup_symbol_wholly_unknown_may_have_no_suggestions():
+    lk = lookup_symbol(_auth_graph(), "zzz.qqq.wxyz")
+    assert lk.known is False  # nothing close -> suggestions may legitimately be empty
+    assert "auth.User" not in lk.suggestions
 
 
 def test_outline_excludes_a_submodule_sharing_the_id_prefix():

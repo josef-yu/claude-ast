@@ -24,11 +24,13 @@ from .query import (
     Reference,
     RepoMapEntry,
     ResolutionMetrics,
+    SymbolLookup,
     find_callers,
     find_definition,
     find_dependencies,
     find_importers,
     find_references,
+    lookup_symbol,
     outline,
     repo_map,
     resolution_metrics,
@@ -131,6 +133,12 @@ class Index:
 
         graph, total_refs = _assemble(result.files, backends)
         return cls(graph, root, skipped=result.skipped, total_refs=total_refs)
+
+    def lookup_symbol(self, query: str) -> SymbolLookup:
+        """Whether ``query`` names a known symbol (in-tree or external), with near-miss suggestions
+        when it doesn't — so a caller can tell a mistyped id from a true empty relationship
+        result."""
+        return lookup_symbol(self.graph, query)
 
     def find_definition(self, name: str) -> list[Definition]:
         return find_definition(self.graph, name)

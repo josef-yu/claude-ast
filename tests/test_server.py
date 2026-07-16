@@ -11,7 +11,7 @@ import pytest
 
 from claude_ast.index import Index, IndexSession
 from claude_ast.server.__main__ import main
-from claude_ast.server.app import _definition, _outline, _ref, build_server
+from claude_ast.server.app import _definition, _outline, _ref, _relations, build_server
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -48,6 +48,23 @@ def test_external_dependency_is_flagged(index: Index) -> None:
     deps = [_ref(r) for r in index.find_dependencies("sample_pkg.externals.build_path")]
     join = next(d for d in deps if d["id"] == "os.path.join")
     assert join["external"] is True and join["tier"] == "definite"
+
+
+def test_relations_shape_found_with_results(index: Index) -> None:
+    sym = "sample_pkg.service.start"
+    r = _relations(index, sym, index.find_dependencies(sym))
+    assert r["symbol"] == sym and r["found"] is True
+    assert r["suggestions"] == []
+    assert any(x["id"] == "sample_pkg.core.hub" for x in r["results"])
+
+
+def test_relations_shape_unknown_symbol_carries_a_near_miss(index: Index) -> None:
+    # a real symbol with no results vs an unknown id: `found` is the disambiguator, and an unknown
+    # id offers near-misses so Claude can retry instead of trusting an empty `results`.
+    sym = "sample_pkg.service.startt"  # typo of ...service.start
+    r = _relations(index, sym, index.find_dependencies(sym))
+    assert r["found"] is False and r["results"] == []
+    assert "sample_pkg.service.start" in r["suggestions"]
 
 
 def test_build_server_registers_tools_without_touching_stdout(capsys) -> None:

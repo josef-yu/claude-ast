@@ -42,6 +42,11 @@ def _add_source(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _suggest(suggestions: list[str]) -> str:
+    """A trailing 'did you mean' clause for an unknown id, or '' when there is no near-miss."""
+    return "  (did you mean: " + ", ".join(suggestions) + "?)" if suggestions else ""
+
+
 def _read_source(span: Span, context: int) -> list[tuple[int, str]]:
     """The source line(s) at ``span`` (1-based, ± ``context``), or [] if unreadable."""
     try:
@@ -169,9 +174,12 @@ def _cmd_def(name: str, root: Path) -> int:
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
-    defs = Index.build(root).find_definition(name)
+    index = Index.build(root)
+    defs = index.find_definition(name)
     if not defs:
-        print(f"no definition found for {name!r}", file=sys.stderr)
+        # No definition by this name — offer near-misses (a bare-name typo, a wrong qualifier).
+        print(f"no definition found for {name!r}{_suggest(index.lookup_symbol(name).suggestions)}",
+              file=sys.stderr)
         return 1
     for d in defs:
         sig = f"  {d.signature}" if d.signature else ""
@@ -184,10 +192,14 @@ def _cmd_outline(module: str, root: Path, focus: str | None = None) -> int:
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
         return 2
 
-    entries = Index.build(root).outline(module, focus)
+    index = Index.build(root)
+    entries = index.outline(module, focus)
     if not entries:
-        print(f"no module {module!r} in the index", file=sys.stderr)
-        return 1
+        # A known module always yields at least its own line, so an empty outline means the id is
+        # unknown — report it as such (exit 2), with near-misses, not as an empty module.
+        hint = _suggest(index.lookup_symbol(module).suggestions)
+        print(f"claude-ast: no such module: {module!r}{hint}", file=sys.stderr)
+        return 2
     for e in entries:
         indent = "  " * e.depth
         label = e.signature or f"{e.kind} {e.name}"
@@ -214,6 +226,13 @@ def _cmd_relations(
     else:
         refs = index.find_dependencies(symbol, conf)
     if not refs:
+        # Distinguish a mistyped/unknown id (exit 2, an input error, with near-misses) from a
+        # genuine empty answer for a real symbol (exit 1) — the two must not read the same.
+        lookup = index.lookup_symbol(symbol)
+        if not lookup.known:
+            print(f"claude-ast: no such symbol: {symbol!r}{_suggest(lookup.suggestions)}",
+                  file=sys.stderr)
+            return 2
         verb = {"callers": "callers of", "importers": "importers of"}.get(which, "dependencies for")
         print(f"no {verb} {symbol!r}", file=sys.stderr)
         return 1

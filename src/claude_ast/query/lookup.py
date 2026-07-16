@@ -8,6 +8,7 @@ hand-built Graph.
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 
 from ..model import Graph, Span, Symbol, SymbolId, SymbolKind
@@ -21,6 +22,45 @@ class Definition:
     kind: str
     span: Span
     signature: str | None
+
+
+@dataclass(slots=True)
+class SymbolLookup:
+    """Whether a query id names a *known* symbol, plus near-miss ids when it doesn't.
+
+    Relationship queries (callers/dependencies/references/importers) take an id as input and return
+    an empty list both when the id is genuinely unused AND when it doesn't exist at all — two very
+    different answers. This resolves the ambiguity so a caller can say "no such symbol; did you
+    mean…?" instead of presenting a mistyped id as a real, empty result.
+    """
+
+    query: SymbolId
+    known: bool
+    suggestions: list[SymbolId]  # nearest known ids when unknown; empty when known
+
+
+def lookup_symbol(graph: Graph, query: SymbolId) -> SymbolLookup:
+    """Resolve a query id to known/unknown. *Known* means an in-tree symbol OR an external
+    (library/stdlib) edge sink — both are valid relationship targets (``find_references`` works on
+    ``os.path.join``). An unknown id carries near-miss suggestions; a known one carries none."""
+    if graph.symbol(query) is not None:
+        return SymbolLookup(query, True, [])
+    return SymbolLookup(query, False, _near_misses(graph, query))
+
+
+def _near_misses(graph: Graph, query: SymbolId, limit: int = 5) -> list[SymbolId]:
+    """The known ids closest to an unknown ``query``, best first — two cheap signals that catch the
+    common mistakes. (1) Exact **bare-name** match: the leaf name is right but the qualifier wrong
+    or missing (``reach`` / ``Hub.reach`` for ``m.Hub.reach``) — the frequent case, so it wins. (2)
+    Else a **fuzzy** bare-name match: a typo in the leaf (``reachh`` for ``reach``). In-tree symbols
+    only (an external id isn't something you 'meant' to navigate to). Runs only on the miss path."""
+    bare = query.rpartition(".")[2]
+    exact = [s.id for s in graph.by_name(bare)]
+    if exact:
+        return exact[:limit]
+    names = {s.name for s in graph.symbols()}
+    close = difflib.get_close_matches(bare, names, n=limit, cutoff=0.7)
+    return [s.id for name in close for s in graph.by_name(name)][:limit]
 
 
 @dataclass(slots=True)

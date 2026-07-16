@@ -61,6 +61,21 @@ def _ref(r: Reference) -> dict:
     }
 
 
+def _relations(index: Index, symbol: str, refs: list[Reference]) -> dict:
+    """Shape a relationship result so an *unknown* id reads differently from a true *empty* answer.
+    ``found`` says whether ``symbol`` is a known id; when false, ``suggestions`` gives near-misses,
+    so Claude retries a mistyped id instead of trusting a bogus 'no results'. ``results`` are the
+    tiered references — empty both for an unknown id and for a real symbol that is simply unused,
+    which ``found`` disambiguates."""
+    lookup = index.lookup_symbol(symbol)
+    return {
+        "symbol": symbol,
+        "found": lookup.known,
+        "results": [_ref(r) for r in refs],
+        "suggestions": lookup.suggestions,
+    }
+
+
 def build_server(session: IndexSession) -> FastMCP:
     """Register the read-only navigation tools over ``session`` and return the FastMCP app.
 
@@ -85,17 +100,22 @@ def build_server(session: IndexSession) -> FastMCP:
         return _outline(session.current, module, focus)
 
     @mcp.tool()
-    def find_callers(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
-        """Symbols that call `symbol`. Each result carries a `tier` (definite | possible);
-        widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
-        return [_ref(r) for r in session.current.find_callers(symbol, Confidence(min_confidence))]
+    def find_callers(symbol: str, min_confidence: _Conf = "medium") -> dict:
+        """Symbols that call `symbol`. Returns `{symbol, found, results, suggestions}`: each result
+        carries a `tier` (definite | possible), and widening `min_confidence` (high -> medium ->
+        low) trades precision for recall. `found` is false when `symbol` names no known id — check
+        it and the `suggestions` near-misses before trusting an empty `results` as 'no callers'."""
+        idx = session.current
+        return _relations(idx, symbol, idx.find_callers(symbol, Confidence(min_confidence)))
 
     @mcp.tool()
-    def find_dependencies(symbol: str, min_confidence: _Conf = "medium") -> list[dict]:
+    def find_dependencies(symbol: str, min_confidence: _Conf = "medium") -> dict:
         """What `symbol` uses — calls, inheritance, and library targets (flagged `external`).
-        Widen `min_confidence` (high -> medium -> low) to trade precision for recall."""
-        deps = session.current.find_dependencies(symbol, Confidence(min_confidence))
-        return [_ref(r) for r in deps]
+        Returns `{symbol, found, results, suggestions}`; widen `min_confidence` (high -> medium ->
+        low) to trade precision for recall. `found` is false for an unknown id (with `suggestions`
+        near-misses), distinguishing it from a real symbol that simply uses nothing."""
+        idx = session.current
+        return _relations(idx, symbol, idx.find_dependencies(symbol, Confidence(min_confidence)))
 
     @mcp.tool()
     def repo_map(focus: str | None = None, budget: int = 2000) -> str:
