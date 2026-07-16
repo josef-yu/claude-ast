@@ -98,13 +98,20 @@ def _visit(
             _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, _ASSIGNMENTS):
             if container in ("module", "class"):
+                # An annotated assignment (`svc: Service`) records the attribute's declared type, so
+                # a receiver chain can thread through it (`self.svc.run()` -> Service.run). Only a
+                # plain-name annotation is kept (subscript/union -> None), mirroring return types.
+                vtype = None
+                if isinstance(child, ast.AnnAssign):
+                    vtype = _annotation_name(child.annotation)
                 for name in _assigned_names(child):
                     vid = f"{prefix}.{name}"
                     if vid in seen:
                         continue  # reassignment of the same name — one variable, not two
                     seen.add(vid)
                     out.append(
-                        Symbol(vid, name, SymbolKind.VARIABLE, span(path, child), parent=prefix)
+                        Symbol(vid, name, SymbolKind.VARIABLE, span(path, child),
+                               parent=prefix, return_type=vtype)
                     )
         elif isinstance(child, _BLOCKS):
             _visit(child, prefix, container, path, out, seen, node_ids)

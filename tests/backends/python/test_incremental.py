@@ -214,6 +214,36 @@ def test_kind_flip_of_a_heuristic_target_reresolves_untyped_callers(tmp_path, me
     assert _canonical(session.current) == _canonical(fresh)
 
 
+def test_retyping_a_chain_intermediate_attribute_reresolves_its_readers(tmp_path):
+    # A multi-member chain `c.engine.start()` threads through the intermediate attribute's declared
+    # type. Retyping that attribute in another module must re-resolve the chain's readers — they see
+    # the change through the (transitive) reverse-import closure, so incremental must match full.
+    for rel, src in _PAD.items():
+        (tmp_path / rel).write_text(src)
+    (tmp_path / "models.py").write_text(
+        "class V8:\n    def start(self):\n        ...\n\n\n"
+        "class V6:\n    def start(self):\n        ...\n\n\n"
+        "class Car:\n    engine: V8\n"  # intermediate attribute typed V8
+    )
+    (tmp_path / "app.py").write_text(
+        "from models import Car\n\n\ndef drive(c: Car):\n    return c.engine.start()\n"
+    )
+    session = IndexSession(tmp_path)
+    assert "app.drive" in {r.id for r in session.current.find_references("models.V8.start")}
+
+    # retype the intermediate attribute V8 -> V6; the chain target must move with it
+    (tmp_path / "models.py").write_text(
+        "class V8:\n    def start(self):\n        ...\n\n\n"
+        "class V6:\n    def start(self):\n        ...\n\n\n"
+        "class Car:\n    engine: V6\n"
+    )
+    session.patch()
+    fresh = Index.build(tmp_path, use_store=False)
+    assert _canonical(session.current) == _canonical(fresh)
+    assert "app.drive" not in {r.id for r in session.current.find_references("models.V8.start")}
+    assert "app.drive" in {r.id for r in session.current.find_references("models.V6.start")}
+
+
 def test_deleting_an_imported_module_reresolves_its_importers(tmp_path):
     # Regression: deleting a module must re-resolve files that imported it (its edges to the gone
     # symbols must drop) — exercises the `deleted` set + reverse-import closure on the patch path.

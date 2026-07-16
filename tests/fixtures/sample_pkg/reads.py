@@ -33,3 +33,13 @@ def ceiling() -> int:
 def sniff(obj) -> str:
     """Untyped receiver read -> a LOW name-match to every ``*.label`` (heuristic)."""
     return obj.label
+
+
+class Hub:
+    """Threads a typed-attribute chain: ``self.widget`` is a ``Widget``, so ``.label`` resolves."""
+
+    widget: Widget  # a typed data attribute -> Widget
+
+    def reach(self) -> str:
+        """Multi-member read: ``self.widget`` (Widget) . ``label`` -> Widget.label (possible)."""
+        return self.widget.label

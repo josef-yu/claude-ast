@@ -168,9 +168,11 @@ class Symbol:
     signature: str | None = None  # the def/class line, body dropped — for repo_map
     doc: str | None = None        # first line of the docstring — the free "summary"
     parent: SymbolId | None = None
-    # A function/method's return annotation as a resolvable type name (``Service``,
-    # ``models.User``, or a string forward-ref) — the fact that lets call-return chaining type
-    # ``make().run()`` in-tree. ``None`` when absent or not a plain name (subscript/union deferred).
+    # The resolvable type name a *reference* to this symbol yields (``Service``, ``models.User``,
+    # or a string forward-ref): a function/method's return annotation (referencing = calling it),
+    # OR a data attribute's declared type (``svc: Service``; referencing = reading it). The fact
+    # that lets a chain thread one hop — ``make().run()`` and ``self.svc.run()`` alike resolve
+    # in-tree. ``None`` when absent or not a plain name (subscript/union deferred).
     return_type: str | None = None
     # True when ``return_type`` was inferred from the body (``return Ctor()``), not declared.
     # Provenance, so an edge built through it is stamped INFERENCE, never ANNOTATION.

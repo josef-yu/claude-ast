@@ -180,6 +180,16 @@ def test_untyped_attribute_read_name_matches_via_heuristic(index: Index) -> None
     assert edge.resolution.source.value == "heuristic"
 
 
+def test_multi_member_attribute_chain_threads_through_a_typed_attribute(index: Index) -> None:
+    # `self.widget.label` in Hub.reach threads self->Hub, widget (typed Widget), label ->
+    # Widget.label — a possible REFERENCE reached only by resolving the intermediate attr's type.
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.reads.Hub.reach")}
+    assert ("sample_pkg.reads.Widget.label", "reference", "possible") in deps
+    assert "sample_pkg.reads.Hub.reach" in {
+        r.id for r in index.find_references("sample_pkg.reads.Widget.label", Confidence.LOW)
+    }
+
+
 def test_stub_resolves_a_member_on_an_external_type(index: Index) -> None:
     # normalize(name: str) -> `name.upper()` binds to the stdlib stub `builtins.str.upper`,
     # a possible-tier edge to an EXTERNAL node (member existence, not dispatch).

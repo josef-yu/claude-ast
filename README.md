@@ -65,7 +65,7 @@ Every edge is tiered `definite` or `possible` and tagged with how it was found, 
 | `definite` | syntactic | direct calls & attribute reads, imports (absolute · relative · package re-exports), inheritance |
 | `definite` | external | library/stdlib targets as `external` nodes — from-import calls, module-rooted attributes (`os.path.join`), builtins (`len`); kept out of ranking |
 | `definite` | call-site | `RECEIVES_ARG` — the concrete type flowing into a parameter (`g(User())` → `g` receives `User`); an observation, never a dispatch claim |
-| `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` / `self.attr` → the member (called *or* read), followed cross-file through bases and re-exports |
+| `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` / `self.attr` → the member (called *or* read), threaded across multi-member chains (`self.a.b` via `a`'s declared type) and cross-file through bases and re-exports |
 | `possible` | stub | members on external **stdlib** types (`p: Path; p.exists()`), from a frozen, generated member table |
 | `possible` | heuristic | name-match for untyped receivers, capped so an over-common name stays silent |
 
