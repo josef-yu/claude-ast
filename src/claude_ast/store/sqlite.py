@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 21  # class/module VARIABLE symbols carry their declared type (attribute chains)
+_SCHEMA_VERSION = 22  # instance attributes (self.x = …) captured as class-member symbols
 
 
 class SqliteStore(Store):

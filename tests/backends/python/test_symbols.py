@@ -117,3 +117,72 @@ def test_reassigned_variable_is_one_symbol_not_a_collision():
     syms = _by_id("x = 1\nx = 2\n", module="m")
     assert "m.x" in syms
     assert "m.x#2" not in syms
+
+
+def _iattr(body: str):
+    """The instance-attribute symbol `m.C.x` extracted from a class body."""
+    return _by_id(f"class C:\n{body}\n", module="m").get("m.C.x")
+
+
+def test_instance_attribute_is_a_class_member_variable():
+    x = _iattr("    def __init__(self):\n        self.x = 1")
+    assert x is not None and x.kind is SymbolKind.VARIABLE and x.parent == "m.C"
+
+
+def test_instance_attribute_typed_by_construction_is_inferred():
+    x = _iattr("    def __init__(self):\n        self.x = Widget()")
+    assert x is not None and x.return_type == "Widget" and x.return_type_inferred is True
+
+
+def test_instance_attribute_typed_by_annotation_is_declared():
+    x = _iattr("    def __init__(self, w):\n        self.x: Widget = w")
+    assert x is not None and x.return_type == "Widget" and x.return_type_inferred is False
+
+
+def test_instance_attribute_from_a_plain_value_is_untyped_but_captured():
+    x = _iattr("    def __init__(self, w):\n        self.x = w")  # a param, not a construction
+    assert x is not None and x.return_type is None
+
+
+def test_instance_attribute_constructor_shadowed_by_a_param_is_untyped():
+    # `self.x = Widget()` where Widget is a parameter constructs the param, not the class.
+    x = _iattr("    def __init__(self, Widget):\n        self.x = Widget()")
+    assert x is not None and x.return_type is None
+
+
+def test_instance_attribute_constructor_shadowed_by_a_vararg_or_kwarg_is_untyped():
+    # a `*args` / `**kwargs` name is a parameter too — a ctor named after one shadows the class.
+    star = _iattr("    def __init__(self, *Widget):\n        self.x = Widget()")
+    assert star is not None and star.return_type is None
+    dstar = _iattr("    def __init__(self, **Widget):\n        self.x = Widget()")
+    assert dstar is not None and dstar.return_type is None
+
+
+def test_instance_attribute_with_conflicting_constructors_is_untyped():
+    x = _iattr(
+        "    def __init__(self, f):\n"
+        "        self.x = Widget()\n"
+        "        if f:\n            self.x = Gadget()"
+    )
+    assert x is not None and x.return_type is None
+
+
+def test_none_then_construction_keeps_the_constructed_type():
+    # `self.x = None` is an Optional path and must not poison a later construction.
+    x = _iattr("    def __init__(self):\n        self.x = None\n        self.x = Widget()")
+    assert x is not None and x.return_type == "Widget" and x.return_type_inferred is True
+
+
+def test_nested_attribute_assignment_is_not_a_class_attribute():
+    # `self.x.y = 1` sets on self.x; it must not mint an `x` (or `y`) class member.
+    syms = _by_id("class C:\n    def m(self):\n        self.x.y = 1\n", module="m")
+    assert "m.C.x" not in syms and "m.C.y" not in syms
+
+
+def test_a_class_level_variable_wins_over_a_same_named_instance_attribute():
+    # A class-level declaration is authoritative; the instance assignment doesn't duplicate it.
+    syms = _by_id(
+        "class C:\n    x: int = 0\n    def __init__(self):\n        self.x = object()\n", module="m"
+    )
+    assert syms["m.C.x"].return_type == "int"  # the class-level annotation, not the instance value
+    assert "m.C.x#2" not in syms

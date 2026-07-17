@@ -119,12 +119,29 @@ def test_method_intermediate_is_not_threaded_through_its_return_type(tmp_path):
     assert index.find_dependencies("m.Car.go", Confidence.LOW) == []
 
 
-def test_unannotated_attribute_intermediate_declines(tmp_path):
-    # `self.engine` has no type annotation, so the chain cannot thread -> no edge (honest miss).
+def test_constructed_instance_attribute_intermediate_threads(tmp_path):
+    # `self.engine = Engine()` in __init__ is a captured, construction-typed instance attribute, so
+    # the chain threads through it: self.engine (Engine) . start -> Engine.start (inference).
     (tmp_path / "m.py").write_text(
         "class Engine:\n    def start(self):\n        ...\n\n\n"
         "class Car:\n"
-        "    def __init__(self):\n        self.engine = Engine()\n"  # instance attr, no symbol/type
+        "    def __init__(self):\n        self.engine = Engine()\n"
+        "    def go(self):\n        return self.engine.start()\n"
+    )
+    index = Index.build(tmp_path)
+    edge = next(e for e in index.graph.out_edges("m.Car.go") if e.dst == "m.Engine.start")
+    assert edge.resolution.confidence.tier == "possible"
+    assert edge.resolution.source.value == "inference"  # a constructed instance attribute
+
+
+def test_opaque_instance_attribute_intermediate_declines(tmp_path):
+    # `self.engine = make()` is an instance attr with no *nameable* type (make is a function, not a
+    # constructor), so the chain still cannot thread -> no edge (an honest miss).
+    (tmp_path / "m.py").write_text(
+        "class Engine:\n    def start(self):\n        ...\n\n\n"
+        "def make():\n    return Engine()\n\n\n"
+        "class Car:\n"
+        "    def __init__(self):\n        self.engine = make()\n"
         "    def go(self):\n        return self.engine.start()\n"
     )
     index = Index.build(tmp_path)

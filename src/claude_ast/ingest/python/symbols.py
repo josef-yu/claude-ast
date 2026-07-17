@@ -85,6 +85,20 @@ def _visit(
                        signature=_class_sig(child), doc=_docline(child), parent=prefix)
             )
             _visit(child, cid, "class", path, out, seen, node_ids)
+            # Instance attributes (`self.x = …` in the class's methods) are class members too — the
+            # dominant way real code holds state — so a receiver chain threads through a typed one
+            # (`self.svc.run()`). Emitted after the class body so a same-named class-level var wins
+            # the id (it's the more authoritative declaration); untyped ones still surface for
+            # find_definition / outline and the read name-match.
+            for name, itype, inferred, anode in _instance_attributes(child):
+                vid = f"{cid}.{name}"
+                if vid in seen:
+                    continue
+                seen.add(vid)
+                out.append(
+                    Symbol(vid, name, SymbolKind.VARIABLE, span(path, anode),
+                           parent=cid, return_type=itype, return_type_inferred=inferred)
+                )
         elif isinstance(child, _FUNCTIONS):
             fid = _unique(f"{prefix}.{child.name}", seen)
             node_ids[child] = fid
@@ -219,3 +233,107 @@ def _assigned_names(node: ast.Assign | ast.AnnAssign) -> list[str]:
         elif isinstance(target, _SEQ_TARGETS):
             names += [e.id for e in target.elts if isinstance(e, ast.Name)]
     return names
+
+
+def _self_attr(node: ast.expr) -> str | None:
+    """The attribute name of a single-level ``self.<name>`` target, else ``None``. ``self.x.y``
+    (nested — sets on ``self.x``, not the class) and any non-``self`` root yield ``None``."""
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+    ):
+        return node.attr
+    return None
+
+
+def _unpacked_self_attrs(target: ast.expr) -> list[str]:
+    """The ``self.<name>`` leaves inside a tuple/list unpacking target (``self.x, self.y = …``)."""
+    if isinstance(target, _SEQ_TARGETS):
+        return [n for elt in target.elts for n in _unpacked_self_attrs(elt)]
+    if isinstance(target, ast.Starred):
+        return _unpacked_self_attrs(target.value)
+    attr = _self_attr(target)
+    return [attr] if attr is not None else []
+
+
+def _instance_attributes(
+    cls: ast.ClassDef,
+) -> list[tuple[str, str | None, bool, ast.stmt]]:
+    """Instance attributes assigned as ``self.<name>`` in the class's methods, as
+    ``(name, type_name, from-inference?, first-assignment node)`` in first-assignment source order.
+
+    Type comes from an **annotation** (``self.x: T`` — declared, authoritative) or a single
+    unambiguous **construction** (``self.x = T()`` — inferred). ``self.x = None`` is an Optional
+    path and does not poison; any other un-nameable value (``self.x = compute()``, a param, an
+    unpacking) leaves it untyped, as does two conflicting constructors. A constructor whose root is
+    a method parameter is skipped (``def __init__(self, Widget): self.x = Widget()`` constructs the
+    parameter, not the class). Descends control-flow blocks but NOT nested scopes — a nested def's
+    ``self`` is a closure we don't track and a nested class has its own. Only single-level
+    ``self.<name>`` targets; the resolver later keeps a type only if it names an in-tree class."""
+    order: list[str] = []
+    first_node: dict[str, ast.stmt] = {}
+    annotated: dict[str, str] = {}
+    ctors: dict[str, set[str]] = {}
+    opaque: set[str] = set()  # had a non-None value we can't name -> the type is unknowable
+
+    def note(name: str, node: ast.stmt) -> None:
+        if name not in first_node:
+            first_node[name] = node
+            order.append(name)
+
+    def direct(attr: str, value: ast.expr | None, node: ast.stmt, params: set[str]) -> None:
+        note(attr, node)
+        if (
+            isinstance(value, ast.Call)
+            and (ctor := _annotation_name(value.func)) is not None
+            and ctor.partition(".")[0] not in params
+        ):
+            ctors.setdefault(attr, set()).add(ctor)
+        elif value is None or (isinstance(value, ast.Constant) and value.value is None):
+            pass  # `self.x = None` — an Optional path, does not poison the type
+        else:
+            opaque.add(attr)
+
+    def walk(node: ast.AST, params: set[str]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.AnnAssign):
+                attr = _self_attr(child.target)
+                if attr is not None:
+                    note(attr, child)
+                    name = _annotation_name(child.annotation)
+                    if name is not None:
+                        annotated.setdefault(attr, name)
+            elif isinstance(child, ast.Assign):
+                for target in child.targets:
+                    attr = _self_attr(target)
+                    if attr is not None:
+                        direct(attr, child.value, child, params)
+                    else:
+                        for unpacked in _unpacked_self_attrs(target):
+                            note(unpacked, child)
+                            opaque.add(unpacked)  # unpacked -> element type unknowable
+            elif isinstance(child, _BLOCKS):
+                walk(child, params)  # a nested scope's `self.x` is not descended
+
+    for method in cls.body:
+        if isinstance(method, _FUNCTIONS):
+            a = method.args
+            params = {p.arg for p in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
+            # ``*args`` / ``**kwargs`` are parameters too — a ctor named after one shadows the class
+            # (``def __init__(self, *Widget): self.x = Widget()`` constructs the tuple, not Widget).
+            for extra in (a.vararg, a.kwarg):
+                if extra is not None:
+                    params.add(extra.arg)
+            walk(method, params)
+
+    result: list[tuple[str, str | None, bool, ast.stmt]] = []
+    for name in order:
+        node = first_node[name]
+        if name in annotated:
+            result.append((name, annotated[name], False, node))
+        elif name in ctors and len(ctors[name]) == 1 and name not in opaque:
+            result.append((name, next(iter(ctors[name])), True, node))
+        else:
+            result.append((name, None, False, node))
+    return result

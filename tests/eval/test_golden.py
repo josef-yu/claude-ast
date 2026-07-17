@@ -180,6 +180,19 @@ def test_untyped_attribute_read_name_matches_via_heuristic(index: Index) -> None
     assert edge.resolution.source.value == "heuristic"
 
 
+def test_constructed_instance_attribute_threads_a_chain(index: Index) -> None:
+    # `self.service = Service()` in __init__ is a captured, construction-typed instance attribute,
+    # so `self.service.run()` in launch threads through it to Service.run (possible, inference).
+    deps = {
+        (d.id, d.kind, d.tier)
+        for d in index.find_dependencies("sample_pkg.service.Bootstrapper.launch")
+    }
+    assert ("sample_pkg.service.Service.run", "call", "possible") in deps
+    # the instance attribute is a first-class class member (visible to find_definition / outline)
+    svc = index.find_definition("sample_pkg.service.Bootstrapper.service")
+    assert [d.kind for d in svc] == ["variable"]
+
+
 def test_multi_member_attribute_chain_threads_through_a_typed_attribute(index: Index) -> None:
     # `self.widget.label` in Hub.reach threads self->Hub, widget (typed Widget), label ->
     # Widget.label — a possible REFERENCE reached only by resolving the intermediate attr's type.
@@ -256,9 +269,14 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     assert callers(cold_index, "sample_pkg.core.Base.save") == save_callers
     assert callers(warm_index, "sample_pkg.core.Base.save") == save_callers
 
-    # ...and the annotation (handle) + construction-inference (bootstrap) edges, which
-    # survive only if receiver_type AND receiver_inferred round-trip through the store.
-    run_callers = {"sample_pkg.service.handle", "sample_pkg.service.bootstrap"}
+    # ...and the annotation (handle) + construction-inference (bootstrap) edges, plus the chain
+    # through a construction-typed instance attribute (Bootstrapper.launch -> self.service.run()) —
+    # all reproduced only if receiver_type / receiver_inferred / the instance-attr type round-trip.
+    run_callers = {
+        "sample_pkg.service.handle",
+        "sample_pkg.service.bootstrap",
+        "sample_pkg.service.Bootstrapper.launch",
+    }
     assert callers(cold_index, "sample_pkg.service.Service.run") == run_callers
     assert callers(warm_index, "sample_pkg.service.Service.run") == run_callers
 
@@ -289,3 +307,15 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     limit_readers = {"sample_pkg.reads.ceiling"}
     assert readers(cold_index, "sample_pkg.core.BASE_LIMIT") == limit_readers
     assert readers(warm_index, "sample_pkg.core.BASE_LIMIT") == limit_readers
+
+    # ...and a chain through a construction-typed INSTANCE attribute (`self.service = Service()` ->
+    # self.service.run()), reproduced only if the instance-attr symbol + its inferred type survive
+    # the round-trip (a warm rebuild reads the persisted symbols, not the source).
+    def launches(index: Index) -> set[str]:
+        return {
+            d.id for d in index.find_dependencies("sample_pkg.service.Bootstrapper.launch")
+            if d.id == "sample_pkg.service.Service.run"
+        }
+
+    assert launches(cold_index) == {"sample_pkg.service.Service.run"}
+    assert launches(warm_index) == {"sample_pkg.service.Service.run"}

@@ -43,3 +43,14 @@ def consume(record) -> None:
 def feed() -> None:
     """Passes a constructed ``Service`` -> `consume` RECEIVES_ARG Service (a definite observation)."""
     consume(Service())
+
+
+class Bootstrapper:
+    """Holds a constructed ``Service`` as an instance attribute — a chain threads through it."""
+
+    def __init__(self) -> None:
+        self.service = Service()  # a construction-typed instance attribute
+
+    def launch(self) -> int:
+        """`self.service` (Service, inferred) . `run` -> Service.run at the possible tier."""
+        return self.service.run()
