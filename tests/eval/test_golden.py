@@ -193,6 +193,15 @@ def test_constructed_instance_attribute_threads_a_chain(index: Index) -> None:
     assert [d.kind for d in svc] == ["variable"]
 
 
+def test_property_is_a_property_kind_and_threads_a_chain(index: Index) -> None:
+    # `@property def face(self) -> Widget` is a PROPERTY (read as a value, not called); a chain
+    # `self.face.label` in Hub.touch threads through its return type to Widget.label.
+    face = index.find_definition("sample_pkg.reads.Hub.face")
+    assert [d.kind for d in face] == ["property"]
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("sample_pkg.reads.Hub.touch")}
+    assert ("sample_pkg.reads.Widget.label", "reference", "possible") in deps
+
+
 def test_multi_member_attribute_chain_threads_through_a_typed_attribute(index: Index) -> None:
     # `self.widget.label` in Hub.reach threads self->Hub, widget (typed Widget), label ->
     # Widget.label — a possible REFERENCE reached only by resolving the intermediate attr's type.
@@ -307,6 +316,17 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     limit_readers = {"sample_pkg.reads.ceiling"}
     assert readers(cold_index, "sample_pkg.core.BASE_LIMIT") == limit_readers
     assert readers(warm_index, "sample_pkg.core.BASE_LIMIT") == limit_readers
+
+    # ...and a chain through a @property (`self.face.label`), reproduced only if the PROPERTY kind
+    # AND its return type round-trip through the store (a warm rebuild reads the persisted symbol).
+    def touches(index: Index) -> set[str]:
+        return {
+            d.id for d in index.find_dependencies("sample_pkg.reads.Hub.touch")
+            if d.id == "sample_pkg.reads.Widget.label"
+        }
+
+    assert touches(cold_index) == {"sample_pkg.reads.Widget.label"}
+    assert touches(warm_index) == {"sample_pkg.reads.Widget.label"}
 
     # ...and a chain through a construction-typed INSTANCE attribute (`self.service = Service()` ->
     # self.service.run()), reproduced only if the instance-attr symbol + its inferred type survive

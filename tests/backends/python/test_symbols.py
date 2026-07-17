@@ -119,6 +119,40 @@ def test_reassigned_variable_is_one_symbol_not_a_collision():
     assert "m.x#2" not in syms
 
 
+def test_property_method_is_a_property_kind():
+    syms = _by_id(
+        "class C:\n    @property\n    def name(self) -> str:\n        return self._n\n", module="m"
+    )
+    assert syms["m.C.name"].kind is SymbolKind.PROPERTY
+    assert syms["m.C.name"].return_type == "str"  # threads a chain like a data attribute
+
+
+def test_cached_property_is_a_property_kind():
+    syms = _by_id(
+        "class C:\n    @functools.cached_property\n    def big(self):\n        return 1\n", "m"
+    )
+    assert syms["m.C.big"].kind is SymbolKind.PROPERTY
+
+
+def test_staticmethod_is_a_method_flagged_static():
+    syms = _by_id("class C:\n    @staticmethod\n    def f(a):\n        return a\n", module="m")
+    assert syms["m.C.f"].kind is SymbolKind.METHOD and syms["m.C.f"].is_static is True
+
+
+def test_plain_method_is_not_static_and_not_a_property():
+    m = _by_id("class C:\n    def m(self):\n        ...\n", module="m")["m.C.m"]
+    assert m.kind is SymbolKind.METHOD and m.is_static is False
+
+
+def test_staticmethod_self_assignment_is_not_an_instance_attribute():
+    # `@staticmethod def f(self): self.x = 1` — `self` is a plain parameter, so `self.x` is not a
+    # class attribute (no decorator tracking would mint a false `C.x`).
+    syms = _by_id(
+        "class C:\n    @staticmethod\n    def f(self):\n        self.x = 1\n", module="m"
+    )
+    assert "m.C.x" not in syms
+
+
 def _iattr(body: str):
     """The instance-attribute symbol `m.C.x` extracted from a class body."""
     return _by_id(f"class C:\n{body}\n", module="m").get("m.C.x")

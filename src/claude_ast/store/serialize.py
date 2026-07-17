@@ -57,6 +57,8 @@ def _symbol_d(s: Symbol) -> dict[str, object]:
         d["rt"] = s.return_type
         if s.return_type_inferred:
             d["rti"] = 1  # provenance flag — a warm rebuild must relabel edges identically
+    if s.is_static:
+        d["st"] = 1  # @staticmethod — its `self` is not the instance (kept out of self-resolution)
     return d
 
 
@@ -71,6 +73,7 @@ def _symbol(v: dict) -> Symbol:
         parent=v["pa"],
         return_type=v.get("rt"),
         return_type_inferred=bool(v.get("rti")),
+        is_static=bool(v.get("st")),
     )
 
 

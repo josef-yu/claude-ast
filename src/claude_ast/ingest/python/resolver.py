@@ -234,7 +234,7 @@ def _surface(fi: FileIndex) -> tuple:
 # covers the call pool as well. Mirrors ``typeres._READABLE`` for class members, kept local so the
 # incremental dirty-set doesn't reach into the resolver's internals.
 _HEURISTIC_MEMBER_KINDS = frozenset(
-    {SymbolKind.METHOD, SymbolKind.VARIABLE, SymbolKind.CLASS}
+    {SymbolKind.METHOD, SymbolKind.VARIABLE, SymbolKind.CLASS, SymbolKind.PROPERTY}
 )
 
 

@@ -15,8 +15,9 @@ from weakref import WeakKeyDictionary
 from ..model import Graph, Symbol, SymbolId, SymbolKind
 from .rank import pagerank
 
-# The structural skeleton — modules become headers, variables are omitted as noise.
-_STRUCTURAL = (SymbolKind.CLASS, SymbolKind.FUNCTION, SymbolKind.METHOD)
+# The structural skeleton — modules become headers, variables are omitted as noise. A PROPERTY is
+# a def with a signature (real API surface), so it's shown like a method, not omitted like a var.
+_STRUCTURAL = (SymbolKind.CLASS, SymbolKind.FUNCTION, SymbolKind.METHOD, SymbolKind.PROPERTY)
 
 # The no-focus ranks and the (-rank, id)-sorted structural candidates are a pure function of the
 # graph, but cost a 40-iteration PageRank plus a full-population sort each call. The server serves

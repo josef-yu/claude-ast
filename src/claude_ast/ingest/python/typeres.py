@@ -287,11 +287,12 @@ def _thread_member_chain(
             return None, inferred, False  # not a member of a known type -> typed-missing, silent
         nxt, hop_inferred = attr_types.get(hop, (None, False))
         if nxt is None:
-            # the member exists but its type isn't a threadable in-tree class. A DATA attribute is a
-            # real value of unknown type (fall back); a method/class value is not (stay silent).
+            # the member exists but its type isn't a threadable in-tree class. A DATA attribute or a
+            # PROPERTY is a real value of unknown type (fall back); a method/class value is not
+            # (stay silent — accessing it yields a bound method / the class object, not data).
             hop_sym = by_id.get(hop)
-            untyped = hop_sym is not None and hop_sym.kind is SymbolKind.VARIABLE
-            return None, inferred, untyped
+            data = hop_sym is not None and hop_sym.kind in _READABLE_DATA
+            return None, inferred, data
         inferred = inferred or hop_inferred
         typ = nxt
     lookup_members = read_members if is_read else ctx.members
@@ -400,8 +401,10 @@ def _typed_symbol_maps(
             cls = resolve_type_name(sym.return_type, defs, fi.imports, all_ids, reexports, by_id)
             if cls is None:
                 continue
-            target = attr_types if sym.kind is SymbolKind.VARIABLE else returns
-            target[sym.id] = (cls, sym.return_type_inferred)
+            # A PROPERTY yields its type when READ (like a data attribute) -> attr_types; a
+            # function/method yields it when CALLED -> returns.
+            read_typed = sym.kind in (SymbolKind.VARIABLE, SymbolKind.PROPERTY)
+            (attr_types if read_typed else returns)[sym.id] = (cls, sym.return_type_inferred)
     return returns, attr_types
 
 
@@ -444,26 +447,38 @@ def _attrs_by_name(
     return by_name
 
 
+# Members whose first parameter is the instance — so a ``self.x`` inside one resolves against the
+# enclosing class. A METHOD or a PROPERTY getter qualifies; a ``@staticmethod`` (kind METHOD, but
+# ``is_static``) does NOT — its ``self`` is just a misnamed parameter.
+_SELF_BOUND = frozenset({SymbolKind.METHOD, SymbolKind.PROPERTY})
+
+
 def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None:
-    """The class ``self`` denotes: the class enclosing the method that made the ref, or
-    None when the ref isn't inside an instance method (nested function, module scope)."""
+    """The class ``self`` denotes: the class enclosing the (instance) method/property that made the
+    ref, or None when the ref isn't inside one (a nested function, module scope, or a staticmethod
+    whose first parameter merely happens to be named ``self``)."""
     method = by_id.get(src)
-    if method is None or method.kind is not SymbolKind.METHOD:
+    if method is None or method.kind not in _SELF_BOUND or method.is_static:
         return None
     cls = by_id.get(method.parent) if method.parent else None
     return cls.id if cls is not None and cls.kind is SymbolKind.CLASS else None
 
 
 # A value CALL must resolve to something callable — a method, a nested function, or a
-# class (instantiation) — so data attributes (class-level VARIABLE) are excluded: this
-# keeps `self.count()` from forging a call to a variable, and keeps a class var from
-# masking a same-named method.
+# class (instantiation) — so data attributes (class-level VARIABLE) and PROPERTYs (accessed, not
+# called) are excluded: this keeps `self.count()` from forging a call to a variable, keeps a class
+# var from masking a same-named method, and makes `obj.prop()` (calling a property) resolve nothing.
 _CALLABLE = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION, SymbolKind.CLASS})
 
-# A bare attribute READ can land on any member, so its lookup adds the data attribute
-# (class-level VARIABLE) the call map deliberately omits: `obj.count` (a variable) IS a
-# valid read target, where `obj.count()` (a call) is not.
-_READABLE = _CALLABLE | {SymbolKind.VARIABLE}
+# Members accessed as a DATA value (not a bound method / class object): a variable or a property.
+# When a chain hits one whose type can't be threaded, its receiver is a real value of unknown type,
+# so the chain falls back to a LOW name-match on the last member (like a single-hop ``obj.attr``).
+_READABLE_DATA = frozenset({SymbolKind.VARIABLE, SymbolKind.PROPERTY})
+
+# A bare attribute READ can land on any member, so its lookup adds the members the call map
+# deliberately omits: a data attribute (VARIABLE) and a PROPERTY — both accessed as a value.
+# `obj.count` / `obj.prop` are valid read targets where `obj.count()` / `obj.prop()` are not.
+_READABLE = _CALLABLE | _READABLE_DATA
 
 
 def _members(

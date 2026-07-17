@@ -140,8 +140,11 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
   et al.; bounded ROI, since their hardest types are mypy-plugin-computed and absent from
   `.pyi`); call-site observations for external and method/constructor callees; annotated
   local assignments (`x: User = ...`) and per-use flow sensitivity (rebinding drops the type
-  today rather than tracking it); a decorator-aware fix for the `@staticmethod`-named-`self`
-  edge.
+  today rather than tracking it). *(Decorator tracking has landed: `@property`/`@cached_property`
+  are a distinct non-callable, chain-threadable `property` kind, and `@staticmethod` is flagged so
+  its `self` is not read as the instance. Resolving a **custom** in-tree property decorator from its
+  own definition — does it produce a `__get__` descriptor? — is a clean resolve-time refinement left
+  for when a codebase actually needs it.)*
 - **Framework-convention rungs** — Django-aware resolution the generic ladder can't see: the
   manager convention (`Model.objects…`), celery task attributes (`fn.delay(…)` → the task
   function), router `register(…)` / `as_view()` targets. Convention-based, so `possible` at

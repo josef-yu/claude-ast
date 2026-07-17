@@ -40,6 +40,15 @@ class Hub:
 
     widget: Widget  # a typed data attribute -> Widget
 
+    @property
+    def face(self) -> Widget:
+        """A ``@property`` returning a Widget — read as a value, and threads a chain via its type."""
+        return self.widget
+
     def reach(self) -> str:
         """Multi-member read: ``self.widget`` (Widget) . ``label`` -> Widget.label (possible)."""
         return self.widget.label
+
+    def touch(self) -> str:
+        """Chain through the property: ``self.face`` (Widget) . ``label`` -> Widget.label (possible)."""
+        return self.face.label

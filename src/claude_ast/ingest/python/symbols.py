@@ -33,6 +33,12 @@ _ASSIGNMENTS = (ast.Assign, ast.AnnAssign)
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 _SEQ_TARGETS = (ast.Tuple, ast.List)
 
+# Property-like decorators (matched on the trailing name, so ``@functools.cached_property`` and a
+# bare ``@cached_property`` both hit) — a method wearing one is a PROPERTY: read as a value, not
+# called. An EXTENSIBLE allowlist: detecting whether an *arbitrary* decorator builds a descriptor is
+# statically undecidable, so a truly-custom one is missed (stays a callable METHOD) — rare, hedged.
+_PROPERTY_DECORATORS = frozenset({"property", "cached_property"})
+
 
 def extract_symbols(
     tree: ast.Module, module: str, path: str
@@ -102,12 +108,19 @@ def _visit(
         elif isinstance(child, _FUNCTIONS):
             fid = _unique(f"{prefix}.{child.name}", seen)
             node_ids[child] = fid
-            kind = SymbolKind.METHOD if container == "class" else SymbolKind.FUNCTION
+            decos = _decorator_names(child) if container == "class" else ()
+            is_static = "staticmethod" in decos
+            if container != "class":
+                kind = SymbolKind.FUNCTION
+            elif any(d in _PROPERTY_DECORATORS for d in decos):
+                kind = SymbolKind.PROPERTY  # accessed as a value, not called
+            else:
+                kind = SymbolKind.METHOD
             rtype, rtype_inferred = _return_type_of(child)
             out.append(
                 Symbol(fid, child.name, kind, span(path, child),
                        signature=_func_sig(child), doc=_docline(child), parent=prefix,
-                       return_type=rtype, return_type_inferred=rtype_inferred)
+                       return_type=rtype, return_type_inferred=rtype_inferred, is_static=is_static)
             )
             _visit(child, fid, "function", path, out, seen, node_ids)
         elif isinstance(child, _ASSIGNMENTS):
@@ -192,6 +205,22 @@ def _return_type_of(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str | N
     if len(ctors) == 1 and not ambiguous:
         return next(iter(ctors)), True
     return None, False
+
+
+def _decorator_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """The trailing name of each decorator: ``@property`` -> ``property``,
+    ``@functools.cached_property`` -> ``cached_property``, ``@app.route(...)`` -> ``route``. Matched
+    against the known-decorator allowlist; a decorator whose trailing name isn't recognized leaves
+    the method a plain callable METHOD (resolving a custom property-maker from its own definition is
+    a deferred, resolve-time refinement)."""
+    names: list[str] = []
+    for deco in node.decorator_list:
+        target = deco.func if isinstance(deco, ast.Call) else deco
+        if isinstance(target, ast.Attribute):
+            names.append(target.attr)
+        elif isinstance(target, ast.Name):
+            names.append(target.id)
+    return names
 
 
 def _annotation_name(node: ast.expr | None) -> str | None:
@@ -317,7 +346,9 @@ def _instance_attributes(
                 walk(child, params)  # a nested scope's `self.x` is not descended
 
     for method in cls.body:
-        if isinstance(method, _FUNCTIONS):
+        # A @staticmethod's first parameter is not the instance, so a `self.x = …` in it is not an
+        # instance attribute of the class (the self-receiver resolvers skip it for the same reason).
+        if isinstance(method, _FUNCTIONS) and "staticmethod" not in _decorator_names(method):
             a = method.args
             params = {p.arg for p in (*a.posonlyargs, *a.args, *a.kwonlyargs)}
             # ``*args`` / ``**kwargs`` are parameters too — a ctor named after one shadows the class

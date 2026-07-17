@@ -132,6 +132,10 @@ class SymbolKind(StrEnum):
     CLASS = "class"
     FUNCTION = "function"
     METHOD = "method"
+    # A method decorated as a property (@property / @cached_property): accessed as a value, not
+    # called — so it reads like a data attribute (its return type threads a chain) and calling it
+    # (``obj.prop()``) resolves to nothing, mirroring how an external stdlib property is treated.
+    PROPERTY = "property"
     VARIABLE = "variable"
     PARAMETER = "parameter"
     EXTERNAL = "external"  # a library/stdlib target referenced but not indexed (no in-tree source)
@@ -177,6 +181,12 @@ class Symbol:
     # True when ``return_type`` was inferred from the body (``return Ctor()``), not declared.
     # Provenance, so an edge built through it is stamped INFERENCE, never ANNOTATION.
     return_type_inferred: bool = False
+    # The member is NOT bound to an instance receiver — a ``@staticmethod`` in Python, a ``static``
+    # method elsewhere. Like ``return_type``, it is a backend-populated / backend-consumed hint: no
+    # neutral layer reads it (the store only round-trips it). A backend's self/this resolver uses it
+    # to know the first parameter / receiver isn't the enclosing instance, so it doesn't forge a
+    # self-dispatch edge on a member whose parameter merely *looks* like the receiver.
+    is_static: bool = False
 
 
 @dataclass(slots=True)
