@@ -18,9 +18,10 @@ from mcp.server.fastmcp import FastMCP
 
 from ..index import Index, IndexSession
 from ..model import Confidence
-from ..query import Reference, render_repo_map
+from ..query import ReassignMode, Reference, Suppressed, render_repo_map
 
 _Conf = Literal["high", "medium", "low"]
+_Reassign = Literal["split", "off", "union"]
 
 
 def _definition(index: Index, name: str) -> list[dict]:
@@ -61,17 +62,19 @@ def _ref(r: Reference) -> dict:
     }
 
 
-def _relations(index: Index, symbol: str, refs: list[Reference]) -> dict:
+def _relations(index: Index, symbol: str, refs: list[Reference], sup: Suppressed) -> dict:
     """Shape a relationship result so an *unknown* id reads differently from a true *empty* answer.
     ``found`` says whether ``symbol`` is a known id; when false, ``suggestions`` gives near-misses,
     so Claude retries a mistyped id instead of trusting a bogus 'no results'. ``results`` are the
     tiered references — empty both for an unknown id and for a real symbol that is simply unused,
-    which ``found`` disambiguates."""
+    which ``found`` disambiguates. ``suppressed`` counts edges the ``min_confidence`` /
+    ``reassignments`` dials hid, so a trimmed result is never read as complete."""
     lookup = index.lookup_symbol(symbol)
     return {
         "symbol": symbol,
         "found": lookup.known,
         "results": [_ref(r) for r in refs],
+        "suppressed": {"confidence": sup.confidence, "reassignment": sup.reassignment},
         "suggestions": lookup.suggestions,
     }
 
@@ -100,22 +103,30 @@ def build_server(session: IndexSession) -> FastMCP:
         return _outline(session.current, module, focus)
 
     @mcp.tool()
-    def find_callers(symbol: str, min_confidence: _Conf = "medium") -> dict:
-        """Symbols that call `symbol`. Returns `{symbol, found, results, suggestions}`: each result
-        carries a `tier` (definite | possible), and widening `min_confidence` (high -> medium ->
-        low) trades precision for recall. `found` is false when `symbol` names no known id — check
-        it and the `suggestions` near-misses before trusting an empty `results` as 'no callers'."""
-        idx = session.current
-        return _relations(idx, symbol, idx.find_callers(symbol, Confidence(min_confidence)))
+    def find_callers(
+        symbol: str, min_confidence: _Conf = "medium", reassignments: _Reassign = "split"
+    ) -> dict:
+        """Symbols that call `symbol`. Returns `{symbol, found, results, suppressed, suggestions}`:
+        each result carries a `tier` (definite | possible); widen `min_confidence` (high, medium,
+        low) for recall. `reassignments` controls edges from a reassigned variable — `split` (the
+        type live at each use), `off` (drop them), `union` (every type it takes). `suppressed` has
+        what the dials hid. `found` is false for an unknown id (see `suggestions`)."""
+        idx, conf, mode = session.current, Confidence(min_confidence), ReassignMode(reassignments)
+        refs = idx.find_callers(symbol, conf, mode)
+        return _relations(idx, symbol, refs, idx.suppression(symbol, "callers", conf, mode))
 
     @mcp.tool()
-    def find_dependencies(symbol: str, min_confidence: _Conf = "medium") -> dict:
+    def find_dependencies(
+        symbol: str, min_confidence: _Conf = "medium", reassignments: _Reassign = "split"
+    ) -> dict:
         """What `symbol` uses — calls, inheritance, and library targets (flagged `external`).
-        Returns `{symbol, found, results, suggestions}`; widen `min_confidence` (high -> medium ->
-        low) to trade precision for recall. `found` is false for an unknown id (with `suggestions`
-        near-misses), distinguishing it from a real symbol that simply uses nothing."""
-        idx = session.current
-        return _relations(idx, symbol, idx.find_dependencies(symbol, Confidence(min_confidence)))
+        Returns `{symbol, found, results, suppressed, suggestions}`; widen `min_confidence` for
+        recall. `reassignments` controls edges from a reassigned variable — `split` (type live at
+        each use), `off` (drop them), `union` (every type it takes). `suppressed` counts what the
+        dials hid. `found` is false for an unknown id (with `suggestions` near-misses)."""
+        idx, conf, mode = session.current, Confidence(min_confidence), ReassignMode(reassignments)
+        refs = idx.find_dependencies(symbol, conf, mode)
+        return _relations(idx, symbol, refs, idx.suppression(symbol, "dependencies", conf, mode))
 
     @mcp.tool()
     def repo_map(focus: str | None = None, budget: int = 2000) -> str:

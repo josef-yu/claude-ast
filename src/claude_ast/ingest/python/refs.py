@@ -44,7 +44,16 @@ from ...model import EdgeKind
 from ..product import RawRef
 from .common import dotted_name, span
 from .flow import flow_types
-from .scope import SCOPES, all_args, binder_names, function_scope, is_local, param_types
+from .scope import (
+    EMPTY_REC,
+    SCOPES,
+    RecType,
+    all_args,
+    binder_names,
+    function_scope,
+    is_local,
+    param_types,
+)
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)  # narrows a def node; used only here
 
@@ -106,7 +115,7 @@ def _visit(
     path: str,
     refs: list[RawRef],
     locals_: list[frozenset[str]],
-    types: dict[str, tuple[tuple[str, ...], bool]],  # local name -> (type name(s), from-inference?)
+    types: dict[str, RecType],  # local name -> its receiver type (see scope.RecType)
     node_ids: dict[ast.AST, str],
 ) -> None:
     if isinstance(node, ast.ClassDef):
@@ -157,10 +166,14 @@ def _visit(
         fn_locals, inferred, annotated_locals, flow_vars = function_scope(node, locals_)
         inner = [*locals_, fn_locals]
         declared = {**param_types(node), **annotated_locals}
+        # A closure over an outer *reassigned* local (`flow=True`) must NOT inherit that variable's
+        # positional flow view: a nested body runs at call time, not at this def's position, so the
+        # live type here is stale. Drop those entries — the variable reverts to untyped in the
+        # nested scope (its honest flow-insensitive state), exactly as a non-flow local would carry.
         inner_types = {
-            **{n: v for n, v in types.items() if n not in fn_locals},
-            **{name: ((t,), True) for name, t in inferred.items()},
-            **{name: (ts, False) for name, ts in declared.items()},
+            **{n: v for n, v in types.items() if n not in fn_locals and not v.flow},
+            **{name: RecType((t,), True) for name, t in inferred.items()},
+            **{name: RecType(ts, False) for name, ts in declared.items()},
         }
         # Flow-sensitive reassignment: a reassigned local's type is position-specific, so each
         # top-level statement carries its own receiver-type view (empty for reassignment-free
@@ -184,7 +197,9 @@ def _visit(
                 _visit(default, enclosing, path, refs, locals_, types, node_ids)
         lambda_locals = frozenset(a.arg for a in all_args(node.args))
         inner = [*locals_, lambda_locals]
-        inner_types = {n: v for n, v in types.items() if n not in lambda_locals}
+        # Drop flow-tagged (reassigned) outer vars, as the nested-def branch does: a lambda body
+        # runs at call time, so the enclosing statement's positional live type is stale for it.
+        inner_types = {n: v for n, v in types.items() if n not in lambda_locals and not v.flow}
         _visit(node.body, enclosing, path, refs, inner, inner_types, node_ids)
         return
 
@@ -206,7 +221,7 @@ def _visit(
                 # value receiver (self.save(), u.save()): record for the type resolvers,
                 # flagged so syntactic binding never mis-resolves a shadowing local, and
                 # stamped with the receiver's type(s) (annotated or inferred) when known.
-                rtypes, rinferred = types.get(root, ((), False))
+                rec = types.get(root, EMPTY_REC)
                 refs.append(
                     RawRef(
                         enclosing,
@@ -214,8 +229,10 @@ def _visit(
                         callee,
                         span(path, node.func),
                         local_root=True,
-                        receiver_types=rtypes,
-                        receiver_inferred=rinferred,
+                        receiver_types=rec.types,
+                        receiver_inferred=rec.inferred,
+                        receiver_flow=rec.flow,
+                        receiver_may_types=rec.may,
                     )
                 )
             # The callee is a flat dotted name — pure Name/Attribute leaves, with no nested refs
@@ -240,10 +257,11 @@ def _visit(
             elif "." in receiver:
                 # value-rooted chain (`self.get().run()`): the receiver is a value-typed call,
                 # so the type resolvers own it — flagged, with the receiver's type(s) when known.
-                rtypes, rinferred = types.get(receiver.partition(".")[0], ((), False))
+                rec = types.get(receiver.partition(".")[0], EMPTY_REC)
                 refs.append(RawRef(
                     enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members,
-                    local_root=True, receiver_types=rtypes, receiver_inferred=rinferred,
+                    local_root=True, receiver_types=rec.types, receiver_inferred=rec.inferred,
+                    receiver_flow=rec.flow, receiver_may_types=rec.may,
                 ))
         # A value-rooted callee has no flat dotted name, so recursing into ``node.func`` lets the
         # REFERENCE branch descend it for nested calls (`re.compile(p)`) WITHOUT emitting a
@@ -266,10 +284,11 @@ def _visit(
             elif "." in dotted:
                 # value receiver (`self.attr`, `u.attr`): the type resolvers own it, stamped with
                 # the receiver's type(s) when known — exactly as a value-receiver CALL is.
-                rtypes, rinferred = types.get(root, ((), False))
+                rec = types.get(root, EMPTY_REC)
                 refs.append(RawRef(
                     enclosing, EdgeKind.REFERENCE, dotted, span(path, node),
-                    local_root=True, receiver_types=rtypes, receiver_inferred=rinferred,
+                    local_root=True, receiver_types=rec.types, receiver_inferred=rec.inferred,
+                    receiver_flow=rec.flow, receiver_may_types=rec.may,
                 ))
             return  # the whole dotted chain is one read — don't re-descend its own segments
         # Value-rooted (`f().attr`) or a Store/Del target (not a read): descend into the receiver

@@ -52,9 +52,10 @@ def test_external_dependency_is_flagged(index: Index) -> None:
 
 def test_relations_shape_found_with_results(index: Index) -> None:
     sym = "sample_pkg.service.start"
-    r = _relations(index, sym, index.find_dependencies(sym))
+    r = _relations(index, sym, index.find_dependencies(sym), index.suppression(sym, "dependencies"))
     assert r["symbol"] == sym and r["found"] is True
     assert r["suggestions"] == []
+    assert r["suppressed"] == {"confidence": 0, "reassignment": 0}
     assert any(x["id"] == "sample_pkg.core.hub" for x in r["results"])
 
 
@@ -62,7 +63,7 @@ def test_relations_shape_unknown_symbol_carries_a_near_miss(index: Index) -> Non
     # a real symbol with no results vs an unknown id: `found` is the disambiguator, and an unknown
     # id offers near-misses so Claude can retry instead of trusting an empty `results`.
     sym = "sample_pkg.service.startt"  # typo of ...service.start
-    r = _relations(index, sym, index.find_dependencies(sym))
+    r = _relations(index, sym, index.find_dependencies(sym), index.suppression(sym, "dependencies"))
     assert r["found"] is False and r["results"] == []
     assert "sample_pkg.service.start" in r["suggestions"]
 

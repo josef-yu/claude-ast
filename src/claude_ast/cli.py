@@ -18,7 +18,7 @@ from pathlib import Path
 from .index import Index, store_path
 from .log import configure as configure_logging
 from .model import Confidence, Span
-from .query import render_repo_map
+from .query import ReassignMode, Suppressed, render_repo_map
 
 
 def _add_min_confidence(parser: argparse.ArgumentParser) -> None:
@@ -29,6 +29,28 @@ def _add_min_confidence(parser: argparse.ArgumentParser) -> None:
         help="lowest confidence to include — high=definite, medium=+typed, "
         "low=+name-match heuristics (default: medium)",
     )
+
+
+def _add_reassignments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--reassignments",
+        choices=["split", "off", "union"],
+        default="split",
+        help="how a reassigned variable's edges surface — split=type live at each use (default), "
+        "off=drop them, union=every type the variable takes anywhere",
+    )
+
+
+def _hidden_clause(sup: Suppressed) -> str:
+    """A one-line summary of what a query's dials hid, so a trimmed result is never silent."""
+    parts, hints = [], []
+    if sup.confidence:
+        parts.append(f"{sup.confidence} below confidence")
+        hints.append("--min-confidence low")
+    if sup.reassignment:
+        parts.append(f"{sup.reassignment} reassignment-derived")
+        hints.append("--reassignments union")
+    return f"({sup.confidence + sup.reassignment} hidden: {', '.join(parts)}; {' / '.join(hints)})"
 
 
 def _add_source(parser: argparse.ArgumentParser) -> None:
@@ -84,12 +106,14 @@ def main(argv: list[str] | None = None) -> int:
     p_callers.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_callers.add_argument("path", nargs="?", default=".", help="project root (default: .)")
     _add_min_confidence(p_callers)
+    _add_reassignments(p_callers)
     _add_source(p_callers)
 
     p_deps = sub.add_parser("deps", help="what a symbol uses")
     p_deps.add_argument("symbol", help="qualified id, e.g. pkg.mod.func")
     p_deps.add_argument("path", nargs="?", default=".", help="project root (default: .)")
     _add_min_confidence(p_deps)
+    _add_reassignments(p_deps)
     _add_source(p_deps)
 
     p_importers = sub.add_parser("importers", help="modules that import a module")
@@ -115,11 +139,13 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_outline(args.module, Path(args.path), args.focus)
     if args.command == "callers":
         return _cmd_relations(
-            args.symbol, Path(args.path), "callers", args.min_confidence, args.source, args.context
+            args.symbol, Path(args.path), "callers", args.min_confidence, args.source, args.context,
+            args.reassignments,
         )
     if args.command == "deps":
         return _cmd_relations(
-            args.symbol, Path(args.path), "deps", args.min_confidence, args.source, args.context
+            args.symbol, Path(args.path), "deps", args.min_confidence, args.source, args.context,
+            args.reassignments,
         )
     if args.command == "importers":
         return _cmd_relations(
@@ -211,7 +237,7 @@ def _cmd_outline(module: str, root: Path, focus: str | None = None) -> int:
 
 def _cmd_relations(
     symbol: str, root: Path, which: str, min_confidence: str,
-    source: bool = False, context: int = 0,
+    source: bool = False, context: int = 0, reassignments: str = "split",
 ) -> int:
     if not root.exists():
         print(f"claude-ast: path not found: {root}", file=sys.stderr)
@@ -219,12 +245,15 @@ def _cmd_relations(
 
     index = Index.build(root)
     conf = Confidence(min_confidence)
+    mode = ReassignMode(reassignments)
     if which == "callers":
-        refs = index.find_callers(symbol, conf)
+        refs = index.find_callers(symbol, conf, mode)
+        sup = index.suppression(symbol, "callers", conf, mode)
     elif which == "importers":
-        refs = index.find_importers(symbol)
+        refs, sup = index.find_importers(symbol), Suppressed()  # imports carry no dials
     else:
-        refs = index.find_dependencies(symbol, conf)
+        refs = index.find_dependencies(symbol, conf, mode)
+        sup = index.suppression(symbol, "dependencies", conf, mode)
     if not refs:
         # Distinguish a mistyped/unknown id (exit 2, an input error, with near-misses) from a
         # genuine empty answer for a real symbol (exit 1) — the two must not read the same.
@@ -234,7 +263,8 @@ def _cmd_relations(
                   file=sys.stderr)
             return 2
         verb = {"callers": "callers of", "importers": "importers of"}.get(which, "dependencies for")
-        print(f"no {verb} {symbol!r}", file=sys.stderr)
+        hidden = f"  {_hidden_clause(sup)}" if sup.any() else ""
+        print(f"no {verb} {symbol!r}{hidden}", file=sys.stderr)
         return 1
     for r in refs:
         loc = f"{r.at.file}:{r.at.line}  " if r.at else ""
@@ -243,6 +273,8 @@ def _cmd_relations(
         if source and r.at is not None:
             for line_no, text in _read_source(r.at, context):
                 print(f"    {line_no:>6}  {text}")
+    if sup.any():
+        print(_hidden_clause(sup), file=sys.stderr)  # meta-line -> stderr; stdout stays results
     return 0
 
 

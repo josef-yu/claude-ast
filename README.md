@@ -83,8 +83,8 @@ claude-ast index <path>              # build/update the index; print a summary
 claude-ast status <path>             # index freshness (cold vs. warm snapshot)
 claude-ast def <name> [path]         # where a name is defined
 claude-ast outline <module> [path] [--focus <symbol>]   # a module's symbols (submodules collapsed)
-claude-ast callers <symbol> [path] [--min-confidence high|medium|low] [-s/--source]   # who calls a symbol
-claude-ast deps <symbol> [path] [--min-confidence high|medium|low] [-s/--source]      # what a symbol uses
+claude-ast callers <symbol> [path] [--min-confidence high|medium|low] [--reassignments split|off|union] [-s/--source]
+claude-ast deps <symbol> [path] [--min-confidence high|medium|low] [--reassignments split|off|union] [-s/--source]
 claude-ast importers <module> [path] [-s/--source]                                    # modules that import a module
 claude-ast repo-map [path] [--focus <id>] [--budget N]
 ```
@@ -93,6 +93,13 @@ claude-ast repo-map [path] [--focus <id>] [--budget N]
 "grep with no false positives," the follow-up read folded in. `importers` is the reverse of
 the module import graph (`import a` / `from a import x` / relative imports all resolved to one
 qualname) — the direction text search does worst.
+
+`--reassignments` dials how a **reassigned local**'s edges surface (see Resolution): `split`
+(default) reports the type live at each use (`x = User(); …; x = Admin(); x.save()` → `Admin.save`
+at that line), `off` drops those flow-derived edges entirely, `union` adds the may-set widening
+(every type the variable takes anywhere). A trimmed result is never silent — when `--min-confidence`
+or `--reassignments` hides edges, the query prints `(N hidden: …)` so you know to widen. The MCP
+relation tools carry the same `reassignments` argument and a structured `suppressed` count.
 
 A **mistyped id reads differently from a true empty answer**: `callers`/`deps`/`importers` on an
 unknown id report `no such symbol: 'X'  (did you mean: …?)` and exit `2`, while a real symbol that
@@ -138,13 +145,11 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
 
 - **P2 resolvers** — an environment-aware provider for *third-party* stubs (`django-stubs`
   et al.; bounded ROI, since their hardest types are mypy-plugin-computed and absent from
-  `.pyi`); call-site observations for external and method/constructor callees; annotated
-  local assignments (`x: User = ...`) and per-use flow sensitivity (rebinding drops the type
-  today rather than tracking it). *(Decorator tracking has landed: `@property`/`@cached_property`
-  are a distinct non-callable, chain-threadable `property` kind, and `@staticmethod` is flagged so
-  its `self` is not read as the instance. Resolving a **custom** in-tree property decorator from its
-  own definition — does it produce a `__get__` descriptor? — is a clean resolve-time refinement left
-  for when a codebase actually needs it.)*
+  `.pyi`); call-site observations for external and method/constructor callees. *(Decorator
+  tracking has landed: `@property`/`@cached_property` are a distinct non-callable, chain-threadable
+  `property` kind, and `@staticmethod` is flagged so its `self` is not read as the instance.
+  Resolving a **custom** in-tree property decorator from its own definition — does it produce a
+  `__get__` descriptor? — is a clean resolve-time refinement left for when a codebase needs it.)*
 - **Framework-convention rungs** — Django-aware resolution the generic ladder can't see: the
   manager convention (`Model.objects…`), celery task attributes (`fn.delay(…)` → the task
   function), router `register(…)` / `as_view()` targets. Convention-based, so `possible` at

@@ -85,6 +85,10 @@ def _ref_d(r: RawRef) -> dict[str, object]:
         d["rt"] = list(r.receiver_types)  # JSON has no tuple — re-tuple on load so warm == cold
     if r.receiver_inferred:
         d["ri"] = 1
+    if r.receiver_flow:
+        d["rf"] = 1  # receiver is a reassigned local -> its edges carry FlowKind.FLOW
+    if r.receiver_may_types:
+        d["rm"] = list(r.receiver_may_types)  # the union-widening (FlowKind.MAY) arms
     if r.arg_types:
         d["ca"] = list(r.arg_types)  # JSON has no tuple — re-tuple on load so warm == cold
     if r.chain:
@@ -101,6 +105,8 @@ def _ref(v: dict) -> RawRef:
         local_root=bool(v.get("l")),
         receiver_types=tuple(v["rt"]) if "rt" in v else (),
         receiver_inferred=bool(v.get("ri")),
+        receiver_flow=bool(v.get("rf")),
+        receiver_may_types=tuple(v["rm"]) if "rm" in v else (),
         arg_types=tuple(v["ca"]) if "ca" in v else (),
         chain=tuple(v["ch"]) if "ch" in v else (),
     )

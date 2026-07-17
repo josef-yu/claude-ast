@@ -53,6 +53,18 @@ class ResolutionSource(StrEnum):
     CALLSITE = "callsite"      # observed at call sites
 
 
+class FlowKind(StrEnum):
+    """How a receiver edge relates to a reassigned local's control flow — an axis orthogonal to
+    source/confidence that the ``reassignments`` query mode filters on. Almost every edge is
+    ``STABLE``; only edges whose receiver is a variable reassigned to different types carry the
+    other two, so a caller can drop the flow-derived guesses (``off``) or widen to the whole
+    may-set (``union``)."""
+
+    STABLE = "stable"  # not from a reassigned variable — the default for every edge
+    FLOW = "flow"      # a reassigned variable's type live at this position (the ``split`` answer)
+    MAY = "may"        # a type the variable takes elsewhere — a union widening (``union`` only)
+
+
 @dataclass(frozen=True, slots=True)
 class Resolution:
     """Provenance + confidence for an edge.
@@ -63,6 +75,12 @@ class Resolution:
 
     source: ResolutionSource
     confidence: Confidence
+    flow: FlowKind = FlowKind.STABLE
+
+    def with_flow(self, flow: FlowKind) -> Resolution:
+        """This resolution re-tagged with a flow kind — used when a reassigned receiver's edge
+        needs to carry ``FLOW`` (its live type) or ``MAY`` (a widening) instead of ``STABLE``."""
+        return Resolution(self.source, self.confidence, flow)
 
     @classmethod
     def syntactic(cls) -> Resolution:

@@ -18,21 +18,28 @@ from .metrics import ResolutionMetrics, resolution_metrics
 from .rank import pagerank
 from .relations import (
     DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_REASSIGNMENTS,
+    ReassignMode,
     Reference,
+    Suppressed,
     find_callers,
     find_dependencies,
     find_importers,
     find_references,
+    suppression,
 )
 from .repomap import RepoMapEntry, render_repo_map, repo_map
 
 __all__ = [
     "DEFAULT_MIN_CONFIDENCE",
+    "DEFAULT_REASSIGNMENTS",
     "Definition",
     "OutlineEntry",
+    "ReassignMode",
     "Reference",
     "RepoMapEntry",
     "ResolutionMetrics",
+    "Suppressed",
     "SymbolLookup",
     "find_callers",
     "find_definition",
@@ -45,4 +52,5 @@ __all__ = [
     "render_repo_map",
     "repo_map",
     "resolution_metrics",
+    "suppression",
 ]

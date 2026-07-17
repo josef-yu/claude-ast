@@ -8,6 +8,7 @@ edge guarantees. Syntactic binding is test_edges.py.
 
 from claude_ast.index import Index
 from claude_ast.model import Confidence
+from claude_ast.query import ReassignMode
 
 
 def test_self_call_resolves_to_the_enclosing_class_member_as_possible(tmp_path):
@@ -293,17 +294,18 @@ def test_straight_line_reassignment_resolves_to_the_live_type(tmp_path):
     )
     index = Index.build(tmp_path)
 
+    # the split (default) view — the live type per site, not the union widening (see the `may` test)
     save = {
         (e.dst, e.resolution.source.value)
         for e in index.graph.out_edges("m.run")
-        if e.dst.endswith(".save")
+        if e.dst.endswith(".save") and e.resolution.flow.value != "may"
     }
     assert save == {("m.Post.save", "inference")}
 
 
 def test_reassignment_reports_each_live_type_at_its_own_site(tmp_path):
     # The positional promise: `x.save()` before the reassignment sees User, after it sees Post —
-    # each use resolves to the type live at that point, at that site's span.
+    # each use resolves to the type live at that point, at that site's span (the split/flow view).
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "class Post:\n    def save(self):\n        ...\n\n\n"
@@ -313,13 +315,90 @@ def test_reassignment_reports_each_live_type_at_its_own_site(tmp_path):
     save = {
         (e.dst, e.at.line)
         for e in index.graph.out_edges("m.run")
-        if e.at is not None and e.dst.endswith(".save") and e.resolution.source.value == "inference"
+        if e.at is not None and e.dst.endswith(".save") and e.resolution.flow.value == "flow"
     }
     # User.save at the first use (line 13), Post.save at the second (line 15) — no cross-attribution
     assert ("m.User.save", 13) in save
     assert ("m.Post.save", 15) in save
     assert ("m.Post.save", 13) not in save
     assert ("m.User.save", 15) not in save
+
+
+def test_reassignment_modes_control_which_edges_surface(tmp_path):
+    # `x = User(); x = Admin(); x.save()` — one use, x is Admin there. off drops the reassignment
+    # edges, split shows the live type (Admin), union adds the may-set widening (User too).
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def run():\n    x = User()\n    x = Admin()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+
+    def deps(mode):
+        return {
+            d.id for d in index.find_dependencies("m.run", Confidence.LOW, mode)
+            if d.id.endswith(".save")
+        }
+
+    assert deps(ReassignMode.OFF) == set()
+    assert deps(ReassignMode.SPLIT) == {"m.Admin.save"}
+    assert deps(ReassignMode.UNION) == {"m.User.save", "m.Admin.save"}
+
+
+def test_suppression_counts_hidden_reassignment_edges(tmp_path):
+    # The honest-reporting promise: a trimmed result reports how many edges each dial hid. split
+    # hides the 1 may widening; off hides that plus the 1 flow (live) edge.
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def run():\n    x = User()\n    x = Admin()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    split = index.suppression("m.run", "dependencies", Confidence.LOW, ReassignMode.SPLIT)
+    off = index.suppression("m.run", "dependencies", Confidence.LOW, ReassignMode.OFF)
+    assert (split.confidence, split.reassignment) == (0, 1)
+    assert (off.confidence, off.reassignment) == (0, 2)
+
+
+def test_flow_does_not_leak_into_a_closure(tmp_path):
+    # A nested function closing over a *reassigned* outer local must NOT inherit the positional flow
+    # view — its body runs at call time, not the def's position, so the live type there is stale.
+    # The closure reverts to the honest untyped state (heuristic only), never a confident FLOW edge.
+    (tmp_path / "m.py").write_text(
+        "class A:\n    def save(self):\n        ...\n\n\n"
+        "class B:\n    def save(self):\n        ...\n\n\n"
+        "def outer():\n"
+        "    x = A()\n    def inner():\n        return x.save()\n    x = B()\n    return inner\n"
+    )
+    index = Index.build(tmp_path)
+    # no FLOW/MAY edge for the closure's `x.save()`: the reassigned var is not a flow position here
+    flowed = {
+        e.dst for e in index.graph.out_edges("m.outer.inner")
+        if e.resolution.flow.value != "stable"
+    }
+    assert flowed == set()
+
+
+def test_untyped_live_receiver_surfaces_may_widening_not_a_heuristic(tmp_path):
+    # `x = <untyped>; x.load(); x = Config()` — at the first use x's live type is unknown, so split
+    # shows nothing (honest) and union surfaces the Config.load may-widening. A reassigned local
+    # with an untyped live type but a nameable may-set is not "untyped": it must not fall to a
+    # spurious stable heuristic wall (the bug the fix removes).
+    (tmp_path / "m.py").write_text(
+        "class Config:\n    def load(self):\n        ...\n\n\ndef compute():\n    return 1\n\n\n"
+        "def f():\n    x = compute() + 1\n    x.load()\n    x = Config()\n    return x\n"
+    )
+    index = Index.build(tmp_path)
+
+    def loads(mode):
+        return {
+            r.id for r in index.find_dependencies("m.f", Confidence.LOW, mode)
+            if r.id.endswith(".load")
+        }
+
+    assert loads(ReassignMode.SPLIT) == set()  # live type unknown at the use
+    assert loads(ReassignMode.UNION) == {"m.Config.load"}  # the may-set widening
+    stable = {
+        e.dst for e in index.graph.out_edges("m.f")
+        if e.dst.endswith(".load") and e.resolution.flow.value == "stable"
+    }
+    assert stable == set()  # no spurious heuristic wall
 
 
 def test_branch_reassignment_reports_the_may_set(tmp_path):
@@ -474,7 +553,7 @@ def test_reannotated_local_resolves_to_the_latest_declaration(tmp_path):
     save = {
         (e.dst, e.resolution.source.value)
         for e in index.graph.out_edges("m.run")
-        if e.dst.endswith(".save")
+        if e.dst.endswith(".save") and e.resolution.flow.value != "may"  # the split (live) view
     }
     assert save == {("m.Admin.save", "annotation")}
 

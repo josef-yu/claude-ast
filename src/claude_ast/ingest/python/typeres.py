@@ -1,6 +1,6 @@
 """Type resolvers — value-typed reference resolution behind the Python backend.
 
-Two value resolvers, sharing one member lookup:
+Two value resolvers, sharing one member lookup (``_member_lookup``):
 
 - ``self.m()``  -> the enclosing class's member (``self``'s type is that class,
   reached structurally via ``parent``/member adjacency, never by parsing the id).
@@ -9,7 +9,8 @@ Two value resolvers, sharing one member lookup:
 
 Each emits a single MEDIUM (``possible``) edge: the statically named member is real,
 but a subclass may override it at runtime, so the edge is honestly possible, not
-definite — the payoff of "report, don't rule".
+definite — the payoff of "report, don't rule". The lookup tables these read are built
+once in ``resolve_index`` (``ResolveIndex``); this module is only the resolution.
 
 Plain functions sharing ``_member_lookup``, not a Resolver protocol/pipeline: the two
 resolvers validate the shared *member lookup*, not a uniform resolver interface, so no
@@ -24,88 +25,31 @@ decorator-aware fix is deferred to when ``symbols.py`` tracks staticmethod-ness.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 
-from ...model import Edge, EdgeKind, Resolution, Symbol, SymbolId, SymbolKind
+from ...model import Edge, EdgeKind, FlowKind, Resolution, Symbol, SymbolId, SymbolKind
 from ..product import FileIndex, RawRef
 from .binding import bind, external_symbol, resolve_external_type_name, resolve_type_name
+from .resolve_index import READABLE_DATA, ResolveIndex
 from .stubs import StubProvider
 
+# Stub member kinds that resolve as a CALL — a value's callable members. A READ accepts any kind
+# (a property/data attribute too), so this gates the call path only.
+_CALLABLE_STUB_KINDS = ("method", "func", "class")
 
-@dataclass(frozen=True, slots=True)
-class ResolveIndex:
-    """The lookup tables shared, unchanged, across every resolve pass — built once here.
+# A name defined as a method on more than this many classes is too ambiguous for the
+# heuristic to be a useful report, so it emits nothing rather than a wall of candidates.
+_HEURISTIC_CAP = 8
 
-    The syntactic main loop and the three value passes (value-types, in-tree chains, call-site
-    observations) each used to rebuild these independently from ``files``/``edges``; nothing
-    invalidates them between passes, so they collapse to one construction. ``bases`` is the one
-    table derived from edges (INHERITS): it is filled after the syntactic loop, which is safe
-    because no value pass emits an INHERITS edge, so it is already complete there.
-    """
-
-    by_id: dict[SymbolId, Symbol]
-    all_ids: set[SymbolId]
-    internal_roots: set[str]
-    reexports: dict[str, dict[str, str]]
-    module_defs: dict[str, dict[str, str]]  # module id -> {top-level name -> symbol id}
-    members: dict[SymbolId, dict[str, SymbolId]]  # callable members — for a CALL receiver
-    read_members: dict[SymbolId, dict[str, SymbolId]]  # + data attributes — for a READ receiver
-    methods_by_name: dict[str, list[SymbolId]]  # callable candidates — the CALL name-match
-    attrs_by_name: dict[str, list[SymbolId]]  # any readable class member — the READ name-match
-    # A symbol's type is context-specific, so it lives in two disjoint maps, never one: ``returns``
-    # is the class you get by *calling* a function/method (its return); ``attr_types`` the class you
-    # get by *reading* a data attribute (its declared type). Calling a variable (``make()`` where
-    # ``make: Service``) invokes ``__call__``, NOT the read-type — so a CALL consumer must read
-    # ``returns`` and a data-attribute chain ``attr_types``; conflating them forges wrong edges.
-    returns: dict[SymbolId, tuple[SymbolId, bool]]  # func/method id -> (return class, inferred?)
-    attr_types: dict[SymbolId, tuple[SymbolId, bool]]  # data-attr id -> (declared class, inferred?)
-    bases: dict[SymbolId, list[SymbolId]]
+# Members whose first parameter is the instance — so a ``self.x`` inside one resolves against the
+# enclosing class. A METHOD or a PROPERTY getter qualifies; a ``@staticmethod`` (kind METHOD, but
+# ``is_static``) does NOT — its ``self`` is just a misnamed parameter.
+_SELF_BOUND = frozenset({SymbolKind.METHOD, SymbolKind.PROPERTY})
 
 
-def module_defs_map(files: Sequence[FileIndex]) -> dict[str, dict[str, str]]:
-    """module id -> its top-level ``{name -> symbol id}`` (first-def wins), for every file.
-
-    A module's top-level defs, keyed for O(1) reuse. First definition wins when a name has
-    same-qualname siblings (``#N``), so binding is deterministic regardless of symbol order —
-    the same ``setdefault`` rule every pass applied when it rebuilt this inline.
-    """
-    out: dict[str, dict[str, str]] = {}
-    for fi in files:
-        defs: dict[str, str] = {}
-        for s in fi.symbols:
-            if s.parent == fi.module:
-                defs.setdefault(s.name, s.id)
-        out[fi.module] = defs
-    return out
-
-
-def resolution_index(
-    files: Sequence[FileIndex],
-    edges: Sequence[Edge],
-    *,
-    by_id: dict[SymbolId, Symbol],
-    all_ids: set[SymbolId],
-    internal_roots: set[str],
-    reexports: dict[str, dict[str, str]],
-    module_defs: dict[str, dict[str, str]],
-) -> ResolveIndex:
-    """Assemble the shared ``ResolveIndex`` once from the file-derived tables the main loop
-    already built plus the tables derived here (members, methods-by-name, returns, bases)."""
-    returns, attr_types = _typed_symbol_maps(files, module_defs, reexports, by_id, all_ids)
-    return ResolveIndex(
-        by_id=by_id,
-        all_ids=all_ids,
-        internal_roots=internal_roots,
-        reexports=reexports,
-        module_defs=module_defs,
-        members=_members(files, _CALLABLE),
-        read_members=_members(files, _READABLE),
-        methods_by_name=_methods_by_name(files),
-        attrs_by_name=_attrs_by_name(files, by_id),
-        returns=returns,
-        attr_types=attr_types,
-        bases=_bases(edges, by_id),
-    )
+def _flowed(res: Resolution, flow: FlowKind) -> Resolution:
+    """``res`` re-tagged with ``flow`` — a no-op for the common ``STABLE`` case (an ordinary,
+    non-reassigned receiver), so only a reassignment-derived edge allocates a new resolution."""
+    return res if flow is FlowKind.STABLE else res.with_flow(flow)
 
 
 def resolve_value_types(
@@ -172,12 +116,30 @@ def _resolve_call_return_chain(
     r_root, _, r_member = ref.name.partition(".")
     if "." in r_member:
         return []  # multi-member receiver (self.a.get) -> deferred
+    seen: set[SymbolId] = set()
+    primary = FlowKind.FLOW if ref.receiver_flow else FlowKind.STABLE
+    out = _chain_arm_edges(
+        ref, r_root, ref.receiver_types, primary, r_member, ctx, module_defs, imports, seen
+    )
+    if ref.receiver_may_types:  # union widening for a reassigned chain receiver
+        out += _chain_arm_edges(
+            ref, r_root, ref.receiver_may_types, FlowKind.MAY, r_member, ctx, module_defs, imports,
+            seen,
+        )
+    return out
+
+
+def _chain_arm_edges(
+    ref: RawRef, r_root: str, type_names: tuple[str, ...], flow: FlowKind, r_member: str,
+    ctx: ResolveIndex, module_defs: dict[str, str], imports: dict[str, str], seen: set[SymbolId],
+) -> list[Edge]:
+    """The call-return-chain edges for one set of receiver arms (``type_names``), tagged ``flow``.
+    Threads each arm's receiver-member return type through the trailing members; dedups via
+    ``seen``. Source provenance: ANNOTATION only if every fact used was declared — a self/inferred
+    receiver or a body-inferred return hop makes it INFERENCE."""
     members, bases, returns = ctx.members, ctx.bases, ctx.returns
     out: list[Edge] = []
-    seen: set[SymbolId] = set()
-    for cls, arm_inferred in _receiver_classes(ref, r_root, ctx, module_defs, imports):
-        # Source provenance: ANNOTATION only if every fact used was declared — a self/inferred
-        # receiver or a body-inferred return hop makes it INFERENCE.
+    for cls, arm_inferred in _receiver_classes(ref, r_root, type_names, ctx, module_defs, imports):
         inferred = arm_inferred
         recv = _member_lookup(cls, r_member, members, bases)
         typ, hop_inferred = returns.get(recv, (None, False)) if recv else (None, False)
@@ -189,8 +151,11 @@ def _resolve_call_return_chain(
         target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
         if target is not None and target not in seen:
             seen.add(target)
-            res = Resolution.inferred() if inferred else Resolution.annotated()
-            out.append(Edge(ref.src, target, ref.kind, res, ref.at))
+            # A MAY (union-widening) arm is speculative -> INFERENCE, never ANNOTATION, even if it
+            # threaded through declared returns (mirrors `_typed_arm_edges`).
+            declared = not inferred and flow is not FlowKind.MAY
+            res = Resolution.annotated() if declared else Resolution.inferred()
+            out.append(Edge(ref.src, target, ref.kind, _flowed(res, flow), ref.at))
     return out
 
 
@@ -210,33 +175,26 @@ def _resolve_receiver_ref(
         return [], []  # a bare local name (no attribute) — nothing to resolve
     chain = rest.split(".")  # `self.a.b` -> ["a", "b"]; `self.attr` -> ["attr"]
     is_read = ref.kind is EdgeKind.REFERENCE
-    if not ref.receiver_types and root != "self":
-        # Untyped receiver: a single attribute name-matches; a chain has no type to thread.
+    if not ref.receiver_types and not ref.receiver_may_types and root != "self":
+        # Fully untyped receiver: a single attribute name-matches; a chain has no type to thread. A
+        # reassigned local with an untyped *live* type but a nameable may-widening is NOT untyped —
+        # it falls through so the widening resolves as MAY (union mode), not a spurious heuristic.
         if len(chain) > 1:
             return [], []
         return _heuristic_edges(ref, chain[0], is_read, ctx), []
-    edges: list[Edge] = []
-    externals: list[Symbol] = []
     seen: set[SymbolId] = set()
-    untyped_any = False
-    classes = _receiver_classes(ref, root, ctx, module_defs, imports)
-    for class_id, inferred in classes:
-        target, thr_inf, untyped = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
-        if target is not None and target not in seen:
-            seen.add(target)
-            res = Resolution.inferred() if thr_inf else Resolution.annotated()
-            edges.append(Edge(ref.src, target, ref.kind, res, ref.at))
-        untyped_any = untyped_any or untyped
-    # External arms resolve a single attribute against the stub tables. An in-tree name is never a
-    # stub target, so only an arm that did NOT resolve in-tree can be external — skip the lookup
-    # entirely when every candidate type already bound to an in-tree class (the common case).
-    if len(chain) == 1 and len(classes) < len(ref.receiver_types):
-        stubbed = _stub_targets(ref, chain[0], is_read, ctx, module_defs, imports, stubs)
-        for member_id, ext in stubbed:
-            if member_id not in seen:
-                seen.add(member_id)
-                edges.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
-                externals.append(ext)
+    primary = FlowKind.FLOW if ref.receiver_flow else FlowKind.STABLE
+    edges, externals, untyped_any = _typed_arm_edges(
+        ref, root, ref.receiver_types, primary, chain, is_read, ctx, module_defs, imports, stubs,
+        seen,
+    )
+    if ref.receiver_may_types:  # union widening — the other types a reassigned receiver takes
+        may_edges, may_ext, _ = _typed_arm_edges(
+            ref, root, ref.receiver_may_types, FlowKind.MAY, chain, is_read, ctx, module_defs,
+            imports, stubs, seen,
+        )
+        edges += may_edges
+        externals += may_ext
     if edges:
         return edges, externals
     if untyped_any:
@@ -246,8 +204,44 @@ def _resolve_receiver_ref(
     return [], []
 
 
+def _typed_arm_edges(
+    ref: RawRef, root: str, type_names: tuple[str, ...], flow: FlowKind, chain: list[str],
+    is_read: bool, ctx: ResolveIndex, module_defs: dict[str, str], imports: dict[str, str],
+    stubs: StubProvider, seen: set[SymbolId],
+) -> tuple[list[Edge], list[Symbol], bool]:
+    """The receiver edges for one set of arms (``type_names``), tagged ``flow`` and deduped via
+    ``seen``. Threads each in-tree arm's member chain to a target; a single external attribute
+    additionally consults the stub tables. A ``MAY`` (union widening) arm is always INFERENCE
+    — a speculative alternative, not a declared fact. Returns ``(edges, externals, untyped_any)``,
+    the last flagging that an intermediate data attribute was un-threadable (heuristic fallback)."""
+    edges: list[Edge] = []
+    externals: list[Symbol] = []
+    untyped_any = False
+    classes = _receiver_classes(ref, root, type_names, ctx, module_defs, imports)
+    for class_id, inferred in classes:
+        target, thr_inf, untyped = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
+        if target is not None and target not in seen:
+            seen.add(target)
+            declared = not thr_inf and flow is not FlowKind.MAY
+            res = Resolution.annotated() if declared else Resolution.inferred()
+            edges.append(Edge(ref.src, target, ref.kind, _flowed(res, flow), ref.at))
+        untyped_any = untyped_any or untyped
+    # External arms resolve a single attribute against the stub tables. An in-tree name is never a
+    # stub target, so only an arm that did NOT resolve in-tree can be external — skip the lookup
+    # entirely when every candidate type already bound to an in-tree class (the common case).
+    if len(chain) == 1 and len(classes) < len(type_names):
+        for member_id, ext in _stub_targets(chain[0], type_names, is_read, ctx, module_defs,
+                                             imports, stubs):
+            if member_id not in seen:
+                seen.add(member_id)
+                edges.append(Edge(ref.src, member_id, ref.kind, _flowed(Resolution.stubbed(), flow),
+                                  ref.at))
+                externals.append(ext)
+    return edges, externals, untyped_any
+
+
 def _receiver_classes(
-    ref: RawRef, root: str, ctx: ResolveIndex,
+    ref: RawRef, root: str, type_names: tuple[str, ...], ctx: ResolveIndex,
     module_defs: dict[str, str], imports: dict[str, str],
 ) -> list[tuple[SymbolId, bool]]:
     """The in-tree CLASS(es) a receiver ``root`` denotes, each with whether any fact used was
@@ -261,7 +255,7 @@ def _receiver_classes(
         return [(cls, True)] if cls is not None else []
     out: list[tuple[SymbolId, bool]] = []
     seen: set[SymbolId] = set()
-    for name in ref.receiver_types:
+    for name in type_names:
         class_id = resolve_type_name(
             name, module_defs, imports, ctx.all_ids, ctx.reexports, ctx.by_id
         )
@@ -313,7 +307,7 @@ def _thread_member_chain(
             # PROPERTY is a real value of unknown type (fall back); a method/class value is not
             # (stay silent — accessing it yields a bound method / the class object, not data).
             hop_sym = by_id.get(hop)
-            data = hop_sym is not None and hop_sym.kind in _READABLE_DATA
+            data = hop_sym is not None and hop_sym.kind in READABLE_DATA
             return None, inferred, data
         inferred = inferred or hop_inferred
         typ = nxt
@@ -333,17 +327,17 @@ def _heuristic_edges(ref: RawRef, attr: str, is_read: bool, ctx: ResolveIndex) -
 
 
 def _stub_targets(
-    ref: RawRef, attr: str, is_read: bool, ctx: ResolveIndex,
+    attr: str, type_names: tuple[str, ...], is_read: bool, ctx: ResolveIndex,
     module_defs: dict[str, str], imports: dict[str, str], stubs: StubProvider,
 ) -> list[tuple[SymbolId, Symbol]]:
-    """External receiver arms: for each type name that resolves to an *external* type carrying
-    ``attr`` in the stub tables, the ``(member id, EXTERNAL member node)`` pair for a MEDIUM STUB
-    edge. A union of externals (or a mixed union's external arms) yields several, deduped; an
+    """External receiver arms: for each of ``type_names`` that resolves to an *external* type
+    carrying ``attr`` in the stubs, the ``(member id, EXTERNAL member node)`` pair for a MEDIUM
+    STUB edge. A union of externals (or a mixed union's external arms) yields several, deduped; an
     in-tree name contributes nothing (the caller resolved those). A call needs a callable member
     (`p.exists()`); a read accepts any member, including a property/data attribute (`p.name`)."""
     out: list[tuple[SymbolId, Symbol]] = []
     seen: set[SymbolId] = set()
-    for name in ref.receiver_types:
+    for name in type_names:
         ext = resolve_external_type_name(
             name, module_defs, imports, ctx.all_ids, ctx.internal_roots, ctx.reexports
         )
@@ -395,91 +389,6 @@ def resolve_intree_chains(
     return out
 
 
-def _typed_symbol_maps(
-    files: Sequence[FileIndex],
-    module_defs: dict[str, dict[str, str]],
-    reexports: dict[str, dict[str, str]],
-    by_id: dict[SymbolId, Symbol],
-    all_ids: set[SymbolId],
-) -> tuple[dict[SymbolId, tuple[SymbolId, bool]], dict[SymbolId, tuple[SymbolId, bool]]]:
-    """``(returns, attr_types)`` — the two disjoint symbol-id -> ``(in-tree CLASS id, inferred?)``
-    maps a chain threads through. Both read the same ``return_type`` field but are keyed by kind,
-    because the type it denotes is context-specific and must NOT be conflated:
-
-    - ``returns`` — a FUNCTION/METHOD's *return* type: the class you get by **calling** it.
-    - ``attr_types`` — a VARIABLE's *declared* type (``svc: Service``): the class you get by
-      **reading** it. Calling a variable invokes ``__call__`` (unmodeled) — a different type.
-
-    A call-return chain (``make().run()``) reads ``returns``; a data-attribute chain (``self.a.b``)
-    reads ``attr_types``. Keeping them separate is what stops a called class-typed variable
-    (``make: Service = Service(); make().run()``) from forging an edge to ``Service.run``.
-
-    The flag is the type's provenance (declared annotation vs body-inferred), carried so a chain
-    edge threaded through it can be stamped with an honest source — ANNOTATION only when every
-    fact used was declared.
-    """
-    returns: dict[SymbolId, tuple[SymbolId, bool]] = {}
-    attr_types: dict[SymbolId, tuple[SymbolId, bool]] = {}
-    for fi in files:
-        defs = module_defs[fi.module]
-        for sym in fi.symbols:
-            if sym.return_type is None:
-                continue
-            cls = resolve_type_name(sym.return_type, defs, fi.imports, all_ids, reexports, by_id)
-            if cls is None:
-                continue
-            # A PROPERTY yields its type when READ (like a data attribute) -> attr_types; a
-            # function/method yields it when CALLED -> returns.
-            read_typed = sym.kind in (SymbolKind.VARIABLE, SymbolKind.PROPERTY)
-            (attr_types if read_typed else returns)[sym.id] = (cls, sym.return_type_inferred)
-    return returns, attr_types
-
-
-# Stub member kinds that resolve as a CALL — a value's callable members. A READ accepts any kind
-# (a property/data attribute too), so this gates the call path only.
-_CALLABLE_STUB_KINDS = ("method", "func", "class")
-
-# A name defined as a method on more than this many classes is too ambiguous for the
-# heuristic to be a useful report, so it emits nothing rather than a wall of candidates.
-_HEURISTIC_CAP = 8
-
-
-def _methods_by_name(files: Sequence[FileIndex]) -> dict[str, list[SymbolId]]:
-    """method name -> the ids of every method with that name, in deterministic order — the CALL
-    heuristic's candidate pool (a value call dispatches to a method)."""
-    by_name: dict[str, list[SymbolId]] = {}
-    for fi in files:
-        for sym in fi.symbols:
-            if sym.kind is SymbolKind.METHOD:
-                by_name.setdefault(sym.name, []).append(sym.id)
-    return by_name
-
-
-def _attrs_by_name(
-    files: Sequence[FileIndex], by_id: dict[SymbolId, Symbol]
-) -> dict[str, list[SymbolId]]:
-    """attribute name -> the ids of every readable *class member* with that name, in deterministic
-    order — the READ heuristic's candidate pool. A bare ``obj.attr`` on an untyped receiver could
-    name any instance member: a method, a class-level variable, or a nested class. Module-level
-    defs are excluded (they aren't reachable as ``instance.attr``), so this is the read counterpart
-    of ``methods_by_name`` widened past callables, not a flat name index."""
-    by_name: dict[str, list[SymbolId]] = {}
-    for fi in files:
-        for sym in fi.symbols:
-            if sym.kind not in _READABLE or sym.parent is None:
-                continue
-            parent = by_id.get(sym.parent)
-            if parent is not None and parent.kind is SymbolKind.CLASS:
-                by_name.setdefault(sym.name, []).append(sym.id)
-    return by_name
-
-
-# Members whose first parameter is the instance — so a ``self.x`` inside one resolves against the
-# enclosing class. A METHOD or a PROPERTY getter qualifies; a ``@staticmethod`` (kind METHOD, but
-# ``is_static``) does NOT — its ``self`` is just a misnamed parameter.
-_SELF_BOUND = frozenset({SymbolKind.METHOD, SymbolKind.PROPERTY})
-
-
 def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None:
     """The class ``self`` denotes: the class enclosing the (instance) method/property that made the
     ref, or None when the ref isn't inside one (a nested function, module scope, or a staticmethod
@@ -489,50 +398,6 @@ def _self_class(src: SymbolId, by_id: dict[SymbolId, Symbol]) -> SymbolId | None
         return None
     cls = by_id.get(method.parent) if method.parent else None
     return cls.id if cls is not None and cls.kind is SymbolKind.CLASS else None
-
-
-# A value CALL must resolve to something callable — a method, a nested function, or a
-# class (instantiation) — so data attributes (class-level VARIABLE) and PROPERTYs (accessed, not
-# called) are excluded: this keeps `self.count()` from forging a call to a variable, keeps a class
-# var from masking a same-named method, and makes `obj.prop()` (calling a property) resolve nothing.
-_CALLABLE = frozenset({SymbolKind.METHOD, SymbolKind.FUNCTION, SymbolKind.CLASS})
-
-# Members accessed as a DATA value (not a bound method / class object): a variable or a property.
-# When a chain hits one whose type can't be threaded, its receiver is a real value of unknown type,
-# so the chain falls back to a LOW name-match on the last member (like a single-hop ``obj.attr``).
-_READABLE_DATA = frozenset({SymbolKind.VARIABLE, SymbolKind.PROPERTY})
-
-# A bare attribute READ can land on any member, so its lookup adds the members the call map
-# deliberately omits: a data attribute (VARIABLE) and a PROPERTY — both accessed as a value.
-# `obj.count` / `obj.prop` are valid read targets where `obj.count()` / `obj.prop()` are not.
-_READABLE = _CALLABLE | _READABLE_DATA
-
-
-def _members(
-    files: Sequence[FileIndex], kinds: frozenset[SymbolKind]
-) -> dict[SymbolId, dict[str, SymbolId]]:
-    """parent id -> {member name -> member id} for members whose kind is in ``kinds``, first-def
-    wins (mirrors module_defs). ``_CALLABLE`` builds the CALL map; ``_READABLE`` the wider READ
-    map. Only ever queried with a CLASS parent, so module-level entries are harmless ballast."""
-    members: dict[SymbolId, dict[str, SymbolId]] = {}
-    for fi in files:
-        for sym in fi.symbols:
-            if sym.parent is not None and sym.kind in kinds:
-                members.setdefault(sym.parent, {}).setdefault(sym.name, sym.id)
-    return members
-
-
-def _bases(edges: Sequence[Edge], by_id: dict[SymbolId, Symbol]) -> dict[SymbolId, list[SymbolId]]:
-    """class id -> its in-tree base class ids, in declaration order (from INHERITS edges).
-
-    External bases carry no in-tree members, so they are excluded (their dst is not a
-    known symbol), which truncates the chain honestly rather than guessing.
-    """
-    bases: dict[SymbolId, list[SymbolId]] = {}
-    for e in edges:
-        if e.kind is EdgeKind.INHERITS and e.dst in by_id:
-            bases.setdefault(e.src, []).append(e.dst)
-    return bases
 
 
 def _member_lookup(

@@ -23,13 +23,9 @@ from ..product import FileIndex, ResolveResult
 from .binding import bind, external_symbol
 from .callsite import observe_arg_types
 from .chains import KEEP, resolve_call_chain, resolve_external_chain
+from .resolve_index import module_defs_map, resolution_index
 from .stubs import StubProvider
-from .typeres import (
-    module_defs_map,
-    resolution_index,
-    resolve_intree_chains,
-    resolve_value_types,
-)
+from .typeres import resolve_intree_chains, resolve_value_types
 
 
 @dataclass(slots=True)
@@ -231,7 +227,7 @@ def _surface(fi: FileIndex) -> tuple:
 
 # Class-member kinds a heuristic edge can bind to: a value CALL matches a METHOD; a bare attribute
 # READ matches any readable member (a data VARIABLE or nested CLASS too). Tracking the read superset
-# covers the call pool as well. Mirrors ``typeres._READABLE`` for class members, kept local so the
+# covers the call pool as well. Mirrors ``resolve_index._READABLE`` for class members, kept local so
 # incremental dirty-set doesn't reach into the resolver's internals.
 _HEURISTIC_MEMBER_KINDS = frozenset(
     {SymbolKind.METHOD, SymbolKind.VARIABLE, SymbolKind.CLASS, SymbolKind.PROPERTY}

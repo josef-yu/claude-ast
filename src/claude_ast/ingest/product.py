@@ -57,6 +57,13 @@ class RawRef:
     local_root: bool = False
     receiver_types: tuple[str, ...] = ()
     receiver_inferred: bool = False
+    # Reassignment flow (see ``ingest/python/flow.py``): ``receiver_flow`` marks a receiver whose
+    # root is a *reassigned* local, so its edges carry ``FlowKind.FLOW`` (the type live at this
+    # position) rather than ``STABLE``. ``receiver_may_types`` are the other types that variable
+    # takes elsewhere — the union widening, emitted as ``FlowKind.MAY`` edges the ``union`` mode
+    # surfaces. Both empty/false for an ordinary (stable) receiver.
+    receiver_flow: bool = False
+    receiver_may_types: tuple[str, ...] = ()
     arg_types: tuple[str | None, ...] = ()
     chain: tuple[str, ...] = ()
 

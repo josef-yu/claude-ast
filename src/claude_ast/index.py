@@ -19,11 +19,14 @@ from .ingest.product import CachedFile, FileIndex
 from .model import Confidence, EdgeKind, Graph
 from .query import (
     DEFAULT_MIN_CONFIDENCE,
+    DEFAULT_REASSIGNMENTS,
     Definition,
     OutlineEntry,
+    ReassignMode,
     Reference,
     RepoMapEntry,
     ResolutionMetrics,
+    Suppressed,
     SymbolLookup,
     find_callers,
     find_definition,
@@ -34,6 +37,7 @@ from .query import (
     outline,
     repo_map,
     resolution_metrics,
+    suppression,
 )
 from .store import SqliteStore
 
@@ -147,22 +151,31 @@ class Index:
         return outline(self.graph, module, focus)
 
     def find_callers(
-        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE,
+        reassignments: ReassignMode = DEFAULT_REASSIGNMENTS,
     ) -> list[Reference]:
-        return find_callers(self.graph, symbol, min_confidence)
+        return find_callers(self.graph, symbol, min_confidence, reassignments)
 
     def find_references(
-        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE,
+        reassignments: ReassignMode = DEFAULT_REASSIGNMENTS,
     ) -> list[Reference]:
-        return find_references(self.graph, symbol, min_confidence)
+        return find_references(self.graph, symbol, min_confidence, reassignments)
 
     def find_importers(self, module: str) -> list[Reference]:
         return find_importers(self.graph, module)
 
     def find_dependencies(
-        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE
+        self, symbol: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE,
+        reassignments: ReassignMode = DEFAULT_REASSIGNMENTS,
     ) -> list[Reference]:
-        return find_dependencies(self.graph, symbol, min_confidence)
+        return find_dependencies(self.graph, symbol, min_confidence, reassignments)
+
+    def suppression(
+        self, symbol: str, which: str, min_confidence: Confidence = DEFAULT_MIN_CONFIDENCE,
+        reassignments: ReassignMode = DEFAULT_REASSIGNMENTS,
+    ) -> Suppressed:
+        return suppression(self.graph, symbol, which, min_confidence, reassignments)
 
     def repo_map(self, budget: int = 2000, focus: str | None = None) -> list[RepoMapEntry]:
         return repo_map(self.graph, budget, focus)

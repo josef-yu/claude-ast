@@ -23,7 +23,7 @@ from collections.abc import Sequence
 from ...model import Edge, EdgeKind, Resolution, SymbolKind
 from ..product import FileIndex
 from .binding import bind, resolve_type_name
-from .typeres import ResolveIndex
+from .resolve_index import ResolveIndex
 
 
 def observe_arg_types(

@@ -15,7 +15,7 @@ import os
 from collections import deque
 from dataclasses import dataclass
 
-from claude_ast.model import EdgeKind, Graph, SymbolKind
+from claude_ast.model import EdgeKind, FlowKind, Graph, SymbolKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,9 @@ def enumerate_edges(graph: Graph) -> list[EdgeRecord]:
     records: list[EdgeRecord] = []
     for sym in graph.symbols():
         for e in graph.out_edges(sym.id):
+            if e.resolution.flow is FlowKind.MAY:
+                continue  # a union-mode-only widening (a type the receiver takes elsewhere) — not
+                # part of the default answer, so it is scored only under `union`, never here
             target = graph.symbol(e.dst)
             records.append(
                 EdgeRecord(

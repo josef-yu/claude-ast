@@ -11,6 +11,7 @@ this backend. Leading-underscore names below are private to this module.
 from __future__ import annotations
 
 import ast
+from typing import NamedTuple
 
 from .common import annotation_types, dotted_name
 
@@ -36,6 +37,22 @@ _MATCH_NAME_NODES = (ast.MatchAs, ast.MatchStar)
 # from-inference?); the empty tuple means untyped.
 type VarType = tuple[tuple[str, ...], bool]
 UNTYPED: VarType = ((), False)
+
+
+class RecType(NamedTuple):
+    """A receiver variable's type as ``refs._visit`` threads it per statement: the primary type
+    name(s), whether they came from inference (vs a declaration), the ``may`` union widening (other
+    types a *reassigned* variable takes elsewhere — surfaced only in ``union`` mode), and whether
+    the receiver is a reassigned/flow variable at all. A stable receiver has empty ``may``/``flow``
+    and behaves exactly as the pre-flow ``(types, inferred)`` pair did."""
+
+    types: tuple[str, ...]
+    inferred: bool
+    may: tuple[str, ...] = ()
+    flow: bool = False
+
+
+EMPTY_REC = RecType((), False)
 
 
 def is_local(name: str, locals_: list[frozenset[str]]) -> bool:

@@ -10,7 +10,7 @@ distribution, biasing the ranking toward that symbol's neighbourhood.
 
 from __future__ import annotations
 
-from ..model import Confidence, EdgeKind, Graph, SymbolId
+from ..model import Confidence, EdgeKind, FlowKind, Graph, SymbolId
 
 _WEIGHT = {Confidence.HIGH: 1.0, Confidence.MEDIUM: 0.5, Confidence.LOW: 0.2}
 
@@ -58,7 +58,9 @@ def pagerank(
     for k, sid in enumerate(ids):
         start = len(dsts)
         for e in graph.out_edges(sid):
-            if e.kind in _RANK_KINDS:
+            # A MAY edge is a union-mode-only widening of a reassigned receiver (a type it takes
+            # *elsewhere*, not at this site) — surfaced on demand, never counted toward centrality.
+            if e.kind in _RANK_KINDS and e.resolution.flow is not FlowKind.MAY:
                 j = index.get(e.dst)
                 if j is not None and j != k:  # in-tree, non-self
                     dsts.append(j)
