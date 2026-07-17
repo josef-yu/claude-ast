@@ -9,7 +9,7 @@ from __future__ import annotations
 import ast
 
 from ...model import Span, Symbol, SymbolKind
-from .common import span
+from .common import annotation_types, span
 
 # Statement blocks we descend into without opening a new scope — a `def` inside
 # an `if`/`try`/`for` is still defined at the enclosing scope.
@@ -126,8 +126,9 @@ def _visit(
         elif isinstance(child, _ASSIGNMENTS):
             if container in ("module", "class"):
                 # An annotated assignment (`svc: Service`) records the attribute's declared type, so
-                # a receiver chain can thread through it (`self.svc.run()` -> Service.run). Only a
-                # plain-name annotation is kept (subscript/union -> None), mirroring return types.
+                # a receiver chain can thread through it (`self.svc.run()` -> Service.run). A single
+                # type is kept (`Service | None` collapses to `Service`); a container or multi-type
+                # union -> None (the type field holds only one), as with return types.
                 vtype = None
                 if isinstance(child, ast.AnnAssign):
                     vtype = _annotation_name(child.annotation)
@@ -224,21 +225,18 @@ def _decorator_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
 
 
 def _annotation_name(node: ast.expr | None) -> str | None:
-    """A return/type annotation as a resolvable name: a bare name (``Service``), an attribute
-    chain (``models.User``), or a string forward-ref (``"Service"``). A subscript / union
-    (``list[Service]``, ``Service | None``) yields ``None`` — left for later work."""
-    if node is None:
-        return None
-    if isinstance(node, ast.Constant):
-        return node.value if isinstance(node.value, str) else None
-    parts: list[str] = []
-    while isinstance(node, ast.Attribute):
-        parts.append(node.attr)
-        node = node.value
-    if isinstance(node, ast.Name):
-        parts.append(node.id)
-        return ".".join(reversed(parts))
-    return None
+    """A return/attribute type annotation as a single resolvable name: a bare name (``Service``),
+    an attribute chain (``models.User``), a string forward-ref (``"Service"``), or an Optional
+    collapsed to its one type (``Service | None`` / ``Optional[Service]`` -> ``Service``). A generic
+    container (``list[Service]``) or a genuine *multi-type* union (``Service | Worker``) yields
+    ``None`` — the single-valued ``return_type`` field can't carry several, so a union return/attr
+    stays deferred (a union *parameter* does fan out, resolved from ``receiver_types``).
+
+    Also names the constructor of a ``return Ctor()`` / ``self.x = Ctor()`` inference (a plain
+    callable name, where the Optional/union cases never arise), so one reader serves both.
+    """
+    names = annotation_types(node)
+    return names[0] if len(names) == 1 else None
 
 
 def _func_sig(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:

@@ -180,6 +180,27 @@ def test_intree_chain_declines_on_an_uninferable_return(tmp_path) -> None:
     assert "m.Service.inner" not in deps
 
 
+def test_optional_return_threads_through_a_chain(tmp_path) -> None:
+    # `def make() -> Service | None` — the Optional collapses to `Service`, so `make().inner()`
+    # threads through the return type exactly as a bare `-> Service` would.
+    src = _INTREE.replace("def make() -> Service:", "def make() -> Service | None:")
+    (tmp_path / "m.py").write_text(src + "def f():\n    return make().inner()\n")
+    deps = {(d.id, d.tier) for d in Index.build(tmp_path).find_dependencies("m.f")}
+    assert ("m.Service.inner", "possible") in deps
+
+
+def test_multi_type_union_return_is_deferred(tmp_path) -> None:
+    # A genuine multi-type union return (`-> Service | Other`) can't be carried by the single
+    # return-type field, so the chain declines (only the receiver call binds) — never a wrong guess.
+    src = _INTREE.replace(
+        "def make() -> Service:", "def make() -> Service | Inner:"
+    )
+    (tmp_path / "m.py").write_text(src + "def f():\n    return make().inner()\n")
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f", Confidence.LOW)}
+    assert "m.make" in deps
+    assert "m.Service.inner" not in deps
+
+
 def test_value_rooted_chain_self_receiver(tmp_path) -> None:
     # self.svc().make().run(): the receiver is a value call (self.svc), resolved via `self`'s
     # class, then the chain threads through the in-tree return types.

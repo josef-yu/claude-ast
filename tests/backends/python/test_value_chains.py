@@ -233,3 +233,19 @@ def test_subscripted_attribute_type_does_not_thread(tmp_path):
     # `start` name-matches only at LOW (or not at all) — never a possible ANNOTATION/INFERENCE edge.
     sources = {e.resolution.source.value for e in index.graph.out_edges("m.Car.go")}
     assert "annotation" not in sources and "inference" not in sources
+
+
+def test_optional_attribute_type_collapses_and_threads(tmp_path):
+    # `svc: Service | None` collapses to `Service` (the None arm is not a receiver type), so
+    # `self.svc.run()` threads through it — unlike a subscripted `list[Service]`, which stays
+    # deferred. Self-rooted, so the provenance is INFERENCE.
+    (tmp_path / "m.py").write_text(
+        "class Service:\n    def run(self):\n        ...\n\n\n"
+        "class App:\n"
+        "    svc: Service | None\n"
+        "    def use(self):\n        return self.svc.run()\n"
+    )
+    index = Index.build(tmp_path)
+    deps = {d.id for d in index.find_dependencies("m.App.use", Confidence.LOW)}
+    assert "m.Service.run" in deps
+    assert "inference" in {e.resolution.source.value for e in index.graph.out_edges("m.App.use")}

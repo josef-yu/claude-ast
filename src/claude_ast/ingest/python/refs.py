@@ -41,7 +41,7 @@ from pathlib import Path
 
 from ...model import EdgeKind
 from ..product import RawRef
-from .common import span
+from .common import annotation_types, span
 
 # Node-class groups hoisted to module scope. An inline ``ast.A | ast.B`` in a hot
 # per-node predicate rebuilds a ``types.UnionType`` on *every* call (millions of
@@ -385,49 +385,10 @@ def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, tu
     types: dict[str, tuple[str, ...]] = {}
     for arg in _all_args(fn.args):
         if arg.annotation is not None:
-            names = _annotation_types(arg.annotation)
+            names = annotation_types(arg.annotation)
             if names:
                 types[arg.arg] = names
     return types
-
-
-# The special forms whose subscript is a receiver type (``Optional[X]``, ``Union[X, Y]``), matched
-# on the head's final component so ``Optional`` / ``typing.Optional`` / ``t.Optional`` all count.
-# Every other subscript head (``list``, ``dict``) denotes a container, not the element's type.
-_OPTIONAL_UNION = frozenset({"Optional", "Union"})
-
-
-def _annotation_types(ann: ast.expr) -> tuple[str, ...]:
-    """The concrete receiver type name(s) an annotation denotes — see ``_annotated_types``.
-    Order-preserving and deduped, so ``User | User`` and ``Union[User, None]`` stay ``("User",)``.
-    """
-    out: list[str] = []
-    _collect_annotation_types(ann, out)
-    seen: set[str] = set()
-    return tuple(t for t in out if t not in seen and not seen.add(t))
-
-
-def _collect_annotation_types(node: ast.expr, out: list[str]) -> None:
-    """Walk an annotation, appending each concrete type name. ``X | Y`` (PEP 604) recurses both
-    arms; ``Optional[X]`` / ``Union[...]`` recurse the subscript's element(s); a bare ``None`` arm
-    is dropped (it is not a receiver type); any other subscript (``list[X]``) is a container and
-    contributes nothing; a plain/dotted name is the type itself."""
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
-        _collect_annotation_types(node.left, out)
-        _collect_annotation_types(node.right, out)
-        return
-    if isinstance(node, ast.Constant) and node.value is None:
-        return  # the ``None`` arm of an Optional / union — not a receiver type
-    if isinstance(node, ast.Subscript):
-        head = _dotted_name(node.value)
-        if head is not None and head.rsplit(".", 1)[-1] in _OPTIONAL_UNION:
-            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
-            for elt in elts:
-                _collect_annotation_types(elt, out)
-        return  # a container subscript (``list[X]``) denotes the container, not ``X`` — deferred
-    dotted = _dotted_name(node)
-    if dotted is not None:
-        out.append(dotted)
 
 
 def _function_scope(
