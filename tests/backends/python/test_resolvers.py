@@ -283,7 +283,9 @@ def test_constructed_local_receiver_resolves_via_inference(tmp_path):
     assert edge.resolution.source.value == "inference"
 
 
-def test_reassigned_local_is_not_inferred_but_falls_to_the_heuristic(tmp_path):
+def test_straight_line_reassignment_resolves_to_the_live_type(tmp_path):
+    # `x = User(); x = Post(); x.save()` — flow tracks the reassignment, so at the use x is Post,
+    # not an ambiguous drop: one INFERENCE edge to Post.save (the type live at that point).
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "class Post:\n    def save(self):\n        ...\n\n\n"
@@ -291,13 +293,50 @@ def test_reassigned_local_is_not_inferred_but_falls_to_the_heuristic(tmp_path):
     )
     index = Index.build(tmp_path)
 
-    # ambiguous construction -> no INFERENCE edge; the untyped receiver name-matches (LOW)
     save = {
         (e.dst, e.resolution.source.value)
         for e in index.graph.out_edges("m.run")
         if e.dst.endswith(".save")
     }
-    assert save == {("m.User.save", "heuristic"), ("m.Post.save", "heuristic")}
+    assert save == {("m.Post.save", "inference")}
+
+
+def test_reassignment_reports_each_live_type_at_its_own_site(tmp_path):
+    # The positional promise: `x.save()` before the reassignment sees User, after it sees Post —
+    # each use resolves to the type live at that point, at that site's span.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "class Post:\n    def save(self):\n        ...\n\n\n"
+        "def run():\n    x = User()\n    x.save()\n    x = Post()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    save = {
+        (e.dst, e.at.line)
+        for e in index.graph.out_edges("m.run")
+        if e.at is not None and e.dst.endswith(".save") and e.resolution.source.value == "inference"
+    }
+    # User.save at the first use (line 13), Post.save at the second (line 15) — no cross-attribution
+    assert ("m.User.save", 13) in save
+    assert ("m.Post.save", 15) in save
+    assert ("m.Post.save", 13) not in save
+    assert ("m.User.save", 15) not in save
+
+
+def test_branch_reassignment_reports_the_may_set(tmp_path):
+    # `x = User(); if c: x = Post(); x.save()` — x could be either at the use (the branch may or
+    # may not run), so it fans out to both arms (the honest may-set), not a wrong-exclusive edge.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "class Post:\n    def save(self):\n        ...\n\n\n"
+        "def run(c):\n    x = User()\n    if c:\n        x = Post()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    save = {
+        (e.dst, e.resolution.source.value)
+        for e in index.graph.out_edges("m.run")
+        if e.dst.endswith(".save")
+    }
+    assert save == {("m.User.save", "inference"), ("m.Post.save", "inference")}
 
 
 def test_a_shadowed_constructor_name_does_not_type_the_receiver(tmp_path):
@@ -372,17 +411,84 @@ def test_typed_receiver_resolves_through_an_in_tree_base(tmp_path):
     assert ("m.Base.hook", "possible") in {(d.id, d.tier) for d in index.find_dependencies("m.use")}
 
 
-def test_local_annotated_assignment_is_not_captured_as_annotation(tmp_path):
-    # `x: User = make()` — a local annotated assignment — is not captured as a receiver
-    # annotation (deferred): no ANNOTATION edge (a LOW heuristic match may appear).
+def test_local_annotated_assignment_resolves_via_the_declared_type(tmp_path):
+    # `x: User = make()` — the local annotation declares x's type (like a parameter), so `x.save()`
+    # resolves to `User.save` (ANNOTATION), trusting the declaration over the `make()` return.
     (tmp_path / "m.py").write_text(
         "class User:\n    def save(self):\n        ...\n\n\n"
         "def make():\n    return object()\n\n\n"
         "def run():\n    x: User = make()\n    return x.save()\n"
     )
     index = Index.build(tmp_path)
-    sources = {e.resolution.source.value for e in index.graph.out_edges("m.run")}
-    assert "annotation" not in sources
+    assert ("m.User.save", "possible") in {(d.id, d.tier) for d in index.find_dependencies("m.run")}
+    edge = next(e for e in index.graph.out_edges("m.run") if e.dst == "m.User.save")
+    assert edge.resolution.source.value == "annotation"
+
+
+def test_bare_annotated_local_without_a_value_is_captured(tmp_path):
+    # `x: User` with no assignment still declares the type, so `x.save()` resolves.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def run():\n    x: User\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.run") == {"m.User.save"}
+
+
+def test_union_annotated_local_fans_out(tmp_path):
+    # A union local annotation fans out to each arm, exactly as a union parameter does.
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def run():\n    x: User | Admin = get()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.run") == {"m.User.save", "m.Admin.save"}
+
+
+def test_optional_annotated_local_collapses(tmp_path):
+    # `x: User | None` collapses to `User` — a single edge, like the parameter case.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def run():\n    x: User | None = get()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.run") == {"m.User.save"}
+
+
+def test_container_annotated_local_is_not_read_as_the_element_type(tmp_path):
+    # `x: list[User]` is a container, not a `User`: no ANNOTATION edge (a LOW heuristic may fire).
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def run():\n    x: list[User] = []\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert "annotation" not in {e.resolution.source.value for e in index.graph.out_edges("m.run")}
+
+
+def test_reannotated_local_resolves_to_the_latest_declaration(tmp_path):
+    # `x: User` then `x: Admin` is a re-declaration, not an unresolvable conflict: flow tracks it,
+    # so at `x.save()` (after both) x is Admin -> a single ANNOTATION edge to Admin.save.
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def run():\n    x: User = a()\n    x: Admin = b()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    save = {
+        (e.dst, e.resolution.source.value)
+        for e in index.graph.out_edges("m.run")
+        if e.dst.endswith(".save")
+    }
+    assert save == {("m.Admin.save", "annotation")}
+
+
+def test_annotated_local_types_from_the_annotation_not_the_rhs(tmp_path):
+    # `x: User = Admin()` — the declared annotation types x, not the `Admin()` on the right-hand
+    # side, so `x.save()` resolves to `User.save` (ANNOTATION) and never to `Admin.save`.
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def run():\n    x: User = Admin()\n    return x.save()\n"
+    )
+    index = Index.build(tmp_path)
+    edge = next(e for e in index.graph.out_edges("m.run") if e.dst == "m.User.save")
+    assert edge.resolution.source.value == "annotation"
+    assert "m.Admin.save" not in {e.dst for e in index.graph.out_edges("m.run")}
 
 
 def test_chained_receiver_is_deferred(tmp_path):
