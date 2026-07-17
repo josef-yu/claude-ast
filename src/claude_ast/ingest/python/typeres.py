@@ -220,11 +220,15 @@ def _resolve_receiver_ref(
         if ref.receiver_type is None:
             return _heuristic_edges(ref, chain[0], is_read, ctx), []
         return _stub_edge(ref, chain[0], is_read, ctx, module_defs, imports, stubs)
-    target, inferred = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
-    if target is None:
-        return [], []
-    res = Resolution.inferred() if inferred else Resolution.annotated()
-    return [Edge(ref.src, target, ref.kind, res, ref.at)], []
+    target, inferred, untyped = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
+    if target is not None:
+        res = Resolution.inferred() if inferred else Resolution.annotated()
+        return [Edge(ref.src, target, ref.kind, res, ref.at)], []
+    if untyped:
+        # an intermediate data attribute has an un-threadable type, so the last member's receiver is
+        # untyped — name-match the last member (LOW), exactly as a single-hop `obj.attr` would.
+        return _heuristic_edges(ref, chain[-1], is_read, ctx), []
+    return [], []
 
 
 def _receiver_class(
@@ -259,24 +263,40 @@ def _receiver_class(
 
 def _thread_member_chain(
     class_id: SymbolId, chain: list[str], inferred: bool, is_read: bool, ctx: ResolveIndex,
-) -> tuple[SymbolId | None, bool]:
-    """Thread a member chain from a receiver class to its target member id (+ the running INFERENCE
-    flag). Every member but the last is *read* as a value, so it advances through ``attr_types`` —
-    the declared type of a DATA attribute. A method/property accessed-not-called is absent from
-    ``attr_types`` (it's a bound method, not its return type), so it declines rather than forging a
-    wrong edge (in-tree property detection is the deferred fix). The last member is the target — a
-    read may land on a data attribute, a call must be callable."""
-    read_members, bases, attr_types = ctx.read_members, ctx.bases, ctx.attr_types
+) -> tuple[SymbolId | None, bool, bool]:
+    """Thread a member chain from a receiver class to its target member id, returning
+    ``(target, inferred, untyped_receiver)``. Every member but the last is *read* as a value and
+    advances through ``attr_types`` — the declared type of a DATA attribute.
+
+    Two ways a hop can fail to thread, and they are NOT the same:
+    - the intermediate member is a **data attribute whose type we can't thread** (untyped, external,
+      or function-return) -> the last member's receiver is a real value of unknown type, like a
+      single-hop ``obj.attr``, so the returned flag is ``True`` and the caller falls back to a LOW
+      name-match on the last member.
+    - the intermediate member is **not found on the (known) receiver type**, or is a method/class
+      accessed-not-called (a bound method, not its return type) -> a typed receiver missing the
+      member, so we stay silent (flag ``False``): never guess when the type is known.
+
+    The last member is the target — a read may land on a data attribute, a call must be callable; a
+    typed-receiver miss there is likewise silent (in-tree property detection is a deferred fix)."""
+    read_members, bases, attr_types, by_id = ctx.read_members, ctx.bases, ctx.attr_types, ctx.by_id
     typ: SymbolId | None = class_id
     for name in chain[:-1]:
         hop = _member_lookup(typ, name, read_members, bases) if typ is not None else None
-        typ, hop_inferred = attr_types.get(hop, (None, False)) if hop is not None else (None, False)
+        if hop is None:
+            return None, inferred, False  # not a member of a known type -> typed-missing, silent
+        nxt, hop_inferred = attr_types.get(hop, (None, False))
+        if nxt is None:
+            # the member exists but its type isn't a threadable in-tree class. A DATA attribute is a
+            # real value of unknown type (fall back); a method/class value is not (stay silent).
+            hop_sym = by_id.get(hop)
+            untyped = hop_sym is not None and hop_sym.kind is SymbolKind.VARIABLE
+            return None, inferred, untyped
         inferred = inferred or hop_inferred
-        if typ is None:
-            return None, inferred
+        typ = nxt
     lookup_members = read_members if is_read else ctx.members
     target = _member_lookup(typ, chain[-1], lookup_members, bases) if typ is not None else None
-    return target, inferred
+    return target, inferred, False
 
 
 def _heuristic_edges(ref: RawRef, attr: str, is_read: bool, ctx: ResolveIndex) -> list[Edge]:

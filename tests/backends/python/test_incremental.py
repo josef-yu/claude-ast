@@ -244,6 +244,31 @@ def test_retyping_a_chain_intermediate_attribute_reresolves_its_readers(tmp_path
     assert "app.drive" in {r.id for r in session.current.find_references("models.V6.start")}
 
 
+def test_rename_of_chain_fallback_target_reresolves_untyped_non_importer(tmp_path):
+    # A multi-member chain `self.x.frob()` on an UNTYPED instance attribute falls back to a LOW
+    # name-match on its last member `frob` — reachable only via the heuristic-name closure (b
+    # imports nothing). A count-preserving class rename changes frob's id, so the dirty set must
+    # track the chain's LAST member (not just single-attribute names) or the cached edge dangles.
+    for rel, src in _PAD.items():
+        (tmp_path / rel).write_text(src)
+    (tmp_path / "a.py").write_text("class W:\n    def frob(self):\n        return 1\n")
+    (tmp_path / "b.py").write_text(  # untyped self.x -> LOW fallback on frob; imports nothing
+        "class Host:\n    def __init__(self, x):\n        self.x = x\n"
+        "    def go(self):\n        return self.x.frob()\n"
+    )
+    session = IndexSession(tmp_path)
+    refs = session.current.find_references("a.W.frob", Confidence.LOW)
+    assert any(r.id == "b.Host.go" for r in refs)  # the chain fallback from the non-importer
+
+    (tmp_path / "a.py").write_text("class X:\n    def frob(self):\n        return 1\n")  # W -> X
+    session.patch()
+    fresh = Index.build(tmp_path, use_store=False)
+    assert _canonical(session.current) == _canonical(fresh)
+    assert session.current.find_references("a.W.frob", Confidence.LOW) == []
+    moved = session.current.find_references("a.X.frob", Confidence.LOW)
+    assert any(r.id == "b.Host.go" for r in moved)
+
+
 def test_deleting_an_imported_module_reresolves_its_importers(tmp_path):
     # Regression: deleting a module must re-resolve files that imported it (its edges to the gone
     # symbols must drop) — exercises the `deleted` set + reverse-import closure on the patch path.

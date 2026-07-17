@@ -281,16 +281,28 @@ def _dep_modules(fi: FileIndex) -> set[str]:
 
 
 def _untyped_method_names(fi: FileIndex) -> set[str]:
-    """Attribute names this file uses on an *untyped* receiver — a call (``obj.m()``) OR a bare read
-    (``obj.attr``), both left to the heuristic resolver. Kind-agnostic on purpose: a change to
-    either name's global member population must re-resolve this file, so both channels are tracked
-    the same way (the read pool that ``_attr_ids`` tracks is a superset of the call pool)."""
+    """Attribute names this file name-matches via the heuristic resolver, so a change to any of
+    their global member populations must re-resolve this file. Two heuristic rungs contribute:
+
+    - a single attribute on an *untyped* receiver (``obj.m()`` / ``obj.attr``) -> that attribute;
+    - a **multi-member chain** (``self.a.b``) -> its LAST member, because when an intermediate hop
+      is an untyped data attribute the chain falls back to a LOW name-match on the last member —
+      this holds regardless of the root's own type, so it is NOT gated on ``receiver_type``.
+
+    Kind-agnostic (call vs read) on purpose: the read pool ``_attr_ids`` tracks is a superset of the
+    call pool. An over-approximation (it may track a name a chain won't fall back on) — safe, it
+    only widens the dirty set. ``ref.chain`` (call-return) chains don't heuristic-fall-back."""
     names: set[str] = set()
     for ref in fi.refs:
-        if ref.local_root and ref.receiver_type is None:
-            _, _, attr = ref.name.partition(".")
-            if attr and "." not in attr:
-                names.add(attr)
+        if not ref.local_root or ref.chain:
+            continue
+        _, _, rest = ref.name.partition(".")
+        if not rest:
+            continue
+        if "." in rest:
+            names.add(rest.rsplit(".", 1)[-1])  # multi-member chain -> LOW fallback on last member
+        elif ref.receiver_type is None:
+            names.add(rest)  # single untyped attribute
     return names
 
 

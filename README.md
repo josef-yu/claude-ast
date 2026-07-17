@@ -67,7 +67,7 @@ Every edge is tiered `definite` or `possible` and tagged with how it was found, 
 | `definite` | call-site | `RECEIVES_ARG` — the concrete type flowing into a parameter (`g(User())` → `g` receives `User`); an observation, never a dispatch claim |
 | `possible` | annotation · inference | typed receivers — `u: User`, `x = User()`, `self.m()` / `self.attr` → the member (called *or* read), threaded across multi-member chains (`self.a.b` via `a`'s declared or constructed type, including instance attributes set as `self.a = A()`) and cross-file through bases and re-exports |
 | `possible` | stub | members on external **stdlib** types (`p: Path; p.exists()`), from a frozen, generated member table |
-| `possible` | heuristic | name-match for untyped receivers, capped so an over-common name stays silent |
+| `possible` | heuristic | name-match for an untyped receiver — a bare `obj.m`, or the last hop of a chain whose intermediate is an untyped data attribute (`self.x.m` with `self.x` untyped) — capped so an over-common name stays silent |
 
 Both a method call and a bare **attribute read** (`obj.attr` with no call) flow through this one
 ladder: a call emits a `CALL` edge restricted to callable targets, a read emits a `REFERENCE`

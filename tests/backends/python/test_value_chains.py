@@ -106,14 +106,41 @@ def test_chain_resolves_the_attribute_type_through_an_in_tree_base(tmp_path):
     }
 
 
-def test_method_intermediate_is_not_threaded_through_its_return_type(tmp_path):
-    # `self.make.start()` where `make` is a METHOD (accessed, not called) is a bound method, NOT its
-    # return type — threading it through the return would forge a wrong edge, so it declines.
+def test_read_chain_through_untyped_attribute_falls_back_to_low(tmp_path):
+    # `self.cfg.value` (a READ) where `self.cfg` is an untyped instance attribute: the last member's
+    # receiver is a real value of unknown type, so it falls back to a LOW REFERENCE name-match.
+    (tmp_path / "m.py").write_text(
+        "class Config:\n    value = 1\n\n\n"
+        "class Host:\n"
+        "    def __init__(self, c):\n        self.cfg = c\n"
+        "    def read(self):\n        return self.cfg.value\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.Host.read") == []  # LOW below the default
+    deps = {(d.id, d.kind, d.tier) for d in index.find_dependencies("m.Host.read", Confidence.LOW)}
+    assert ("m.Config.value", "reference", "possible") in deps
+
+
+def test_method_intermediate_does_not_fall_back(tmp_path):
+    # `self.make.start()` where `make` is a METHOD (accessed, not called) is a bound method value —
+    # NOT a data attribute of unknown type — so the chain stays silent, never threading its return
+    # type NOR falling back to a name-match on `start`.
     (tmp_path / "m.py").write_text(
         "class Engine:\n    def start(self):\n        ...\n\n\n"
         "class Car:\n"
         "    def make(self) -> Engine:\n        return Engine()\n"
         "    def go(self):\n        return self.make.start()\n"
+    )
+    index = Index.build(tmp_path)
+    assert index.find_dependencies("m.Car.go", Confidence.LOW) == []
+
+
+def test_non_member_chain_intermediate_stays_silent(tmp_path):
+    # `self.tpyo.start()` where `tpyo` is not a member of the (known) class is a typed-receiver
+    # miss, not an untyped receiver — so it stays silent (no fallback): don't guess a known type.
+    (tmp_path / "m.py").write_text(
+        "class Engine:\n    def start(self):\n        ...\n\n\n"
+        "class Car:\n    def go(self):\n        return self.tpyo.start()\n"
     )
     index = Index.build(tmp_path)
     assert index.find_dependencies("m.Car.go", Confidence.LOW) == []
@@ -134,9 +161,10 @@ def test_constructed_instance_attribute_intermediate_threads(tmp_path):
     assert edge.resolution.source.value == "inference"  # a constructed instance attribute
 
 
-def test_opaque_instance_attribute_intermediate_declines(tmp_path):
-    # `self.engine = make()` is an instance attr with no *nameable* type (make is a function, not a
-    # constructor), so the chain still cannot thread -> no edge (an honest miss).
+def test_untyped_instance_attribute_intermediate_falls_back_to_low(tmp_path):
+    # `self.engine = make()` is an instance attr with no threadable type (make is a function, not a
+    # constructor). The chain can't resolve precisely, so its LAST member falls back to a LOW
+    # name-match — exactly as a single-hop `obj.start()` on an untyped receiver would.
     (tmp_path / "m.py").write_text(
         "class Engine:\n    def start(self):\n        ...\n\n\n"
         "def make():\n    return Engine()\n\n\n"
@@ -145,7 +173,11 @@ def test_opaque_instance_attribute_intermediate_declines(tmp_path):
         "    def go(self):\n        return self.engine.start()\n"
     )
     index = Index.build(tmp_path)
-    assert index.find_dependencies("m.Car.go", Confidence.LOW) == []
+    assert index.find_dependencies("m.Car.go") == []  # LOW is below the MEDIUM default floor
+    deps = {(d.id, d.tier) for d in index.find_dependencies("m.Car.go", Confidence.LOW)}
+    assert ("m.Engine.start", "possible") in deps
+    edge = next(e for e in index.graph.out_edges("m.Car.go") if e.dst == "m.Engine.start")
+    assert edge.resolution.source.value == "heuristic"
 
 
 def test_untyped_receiver_chain_declines(tmp_path):
