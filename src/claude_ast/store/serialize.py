@@ -81,8 +81,8 @@ def _ref_d(r: RawRef) -> dict[str, object]:
     d: dict[str, object] = {"s": r.src, "k": r.kind.value, "n": r.name, "a": _span_d(r.at)}
     if r.local_root:
         d["l"] = 1  # omit when false/absent to keep the common-case blob small
-    if r.receiver_type is not None:
-        d["rt"] = r.receiver_type
+    if r.receiver_types:
+        d["rt"] = list(r.receiver_types)  # JSON has no tuple — re-tuple on load so warm == cold
     if r.receiver_inferred:
         d["ri"] = 1
     if r.arg_types:
@@ -99,7 +99,7 @@ def _ref(v: dict) -> RawRef:
         name=v["n"],
         at=_span(v["a"]),
         local_root=bool(v.get("l")),
-        receiver_type=v.get("rt"),
+        receiver_types=tuple(v["rt"]) if "rt" in v else (),
         receiver_inferred=bool(v.get("ri")),
         arg_types=tuple(v["ca"]) if "ca" in v else (),
         chain=tuple(v["ch"]) if "ch" in v else (),

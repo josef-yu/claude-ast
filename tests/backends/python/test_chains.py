@@ -193,6 +193,20 @@ def test_value_rooted_chain_self_receiver(tmp_path) -> None:
     assert {"m.App.svc", "m.Service.make", "m.Inner.run"} <= deps
 
 
+def test_union_receiver_call_return_chain_threads_each_arm(tmp_path) -> None:
+    # u.get().run() with `u: A | B`, both A.get and B.get returning Service: the value-receiver
+    # call-return chain threads on each arm, so `run` resolves through the shared return type (one
+    # deduped Service.run edge), plus each arm's own `get` receiver call.
+    (tmp_path / "m.py").write_text(
+        "class Service:\n    def run(self): return 1\n\n\n"
+        "class A:\n    def get(self) -> Service: return Service()\n\n\n"
+        "class B:\n    def get(self) -> Service: return Service()\n\n\n"
+        "def f(u: A | B):\n    return u.get().run()\n"
+    )
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.f", Confidence.LOW)}
+    assert {"m.A.get", "m.B.get", "m.Service.run"} <= deps
+
+
 def _source_of(index: Index, src: str, dst: str) -> str:
     return next(e.resolution.source.value for e in index.graph.out_edges(src) if e.dst == dst)
 

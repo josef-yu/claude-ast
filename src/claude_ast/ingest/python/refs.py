@@ -17,8 +17,10 @@ value (``self.save()``, ``u.save()``) are recorded with ``local_root=True`` — 
 OUT of syntactic binding (a local root may shadow an import, so binding it would
 forge a wrong edge) and left for the P2 type resolvers. When the receiver's type is
 known in scope — a parameter annotation or a local ``x = Foo()`` construction — the
-ref carries it (``receiver_type``, with ``receiver_inferred`` telling the two apart)
-so the type resolvers can bind it. A bare local call (``x()``) is still skipped.
+ref carries it (``receiver_types``, with ``receiver_inferred`` telling annotation from
+inference apart) so the type resolvers can bind it. A union annotation carries several
+types (``u: User | Admin`` -> ``("User", "Admin")``); ``X | None`` / ``Optional[X]``
+collapse to the one non-``None`` type. A bare local call (``x()``) is still skipped.
 A name-callee call also records the concrete types seen at its positional arguments
 (``g(User())`` -> ``arg_types=("User",)``), which the call-site pass turns into definite
 ``RECEIVES_ARG`` observations — constructions only, so the observed type is exact.
@@ -118,7 +120,7 @@ def _visit(
     path: str,
     refs: list[RawRef],
     locals_: list[frozenset[str]],
-    types: dict[str, tuple[str, bool]],  # local name -> (type name, from-inference?)
+    types: dict[str, tuple[tuple[str, ...], bool]],  # local name -> (type name(s), from-inference?)
     node_ids: dict[ast.AST, str],
 ) -> None:
     if isinstance(node, ast.ClassDef):
@@ -169,8 +171,8 @@ def _visit(
         inner = [*locals_, fn_locals]
         inner_types = {
             **{n: v for n, v in types.items() if n not in fn_locals},
-            **{name: (t, True) for name, t in inferred.items()},
-            **{name: (t, False) for name, t in _annotated_types(node).items()},
+            **{name: ((t,), True) for name, t in inferred.items()},
+            **{name: (ts, False) for name, ts in _annotated_types(node).items()},
         }
         for stmt in node.body:
             _visit(stmt, fid, path, refs, inner, inner_types, node_ids)
@@ -210,8 +212,8 @@ def _visit(
             elif "." in callee:
                 # value receiver (self.save(), u.save()): record for the type resolvers,
                 # flagged so syntactic binding never mis-resolves a shadowing local, and
-                # stamped with the receiver's type (annotated or inferred) when known.
-                rtype, rinferred = types.get(root, (None, False))
+                # stamped with the receiver's type(s) (annotated or inferred) when known.
+                rtypes, rinferred = types.get(root, ((), False))
                 refs.append(
                     RawRef(
                         enclosing,
@@ -219,7 +221,7 @@ def _visit(
                         callee,
                         span(path, node.func),
                         local_root=True,
-                        receiver_type=rtype,
+                        receiver_types=rtypes,
                         receiver_inferred=rinferred,
                     )
                 )
@@ -244,11 +246,11 @@ def _visit(
                 ))
             elif "." in receiver:
                 # value-rooted chain (`self.get().run()`): the receiver is a value-typed call,
-                # so the type resolvers own it — flagged, with the receiver's type when known.
-                rtype, rinferred = types.get(receiver.partition(".")[0], (None, False))
+                # so the type resolvers own it — flagged, with the receiver's type(s) when known.
+                rtypes, rinferred = types.get(receiver.partition(".")[0], ((), False))
                 refs.append(RawRef(
                     enclosing, EdgeKind.CALL, receiver, span(path, node.func), chain=members,
-                    local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
+                    local_root=True, receiver_types=rtypes, receiver_inferred=rinferred,
                 ))
         # A value-rooted callee has no flat dotted name, so recursing into ``node.func`` lets the
         # REFERENCE branch descend it for nested calls (`re.compile(p)`) WITHOUT emitting a
@@ -270,11 +272,11 @@ def _visit(
                 refs.append(RawRef(enclosing, EdgeKind.REFERENCE, dotted, span(path, node)))
             elif "." in dotted:
                 # value receiver (`self.attr`, `u.attr`): the type resolvers own it, stamped with
-                # the receiver's type when known — exactly as a value-receiver CALL is.
-                rtype, rinferred = types.get(root, (None, False))
+                # the receiver's type(s) when known — exactly as a value-receiver CALL is.
+                rtypes, rinferred = types.get(root, ((), False))
                 refs.append(RawRef(
                     enclosing, EdgeKind.REFERENCE, dotted, span(path, node),
-                    local_root=True, receiver_type=rtype, receiver_inferred=rinferred,
+                    local_root=True, receiver_types=rtypes, receiver_inferred=rinferred,
                 ))
             return  # the whole dotted chain is one read — don't re-descend its own segments
         # Value-rooted (`f().attr`) or a Store/Del target (not a read): descend into the receiver
@@ -371,22 +373,61 @@ def _arg_types(node: ast.Call, locals_: list[frozenset[str]]) -> tuple[str | Non
     return tuple(names)
 
 
-def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-    """Parameter name -> its annotated type name (bare or dotted, e.g. ``User`` /
-    ``models.User``), for the annotation resolver.
-
-    Only annotations that are a plain name or attribute chain are recorded; subscripts
-    and unions (``list[User]``, ``User | None``) yield no fact via ``_dotted_name`` and
-    are left for a later resolver. Parameters only this increment — annotated local
-    assignments and ``x = User()`` inference are deferred.
+def _annotated_types(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, tuple[str, ...]]:
+    """Parameter name -> the receiver type name(s) its annotation denotes, for the annotation
+    resolver. A plain/dotted name (``User`` / ``models.User``) yields one type; a union
+    (``User | Admin``, ``Union[User, Admin]``) yields each concrete arm — the resolver fans a
+    member call out to one edge per arm — and an Optional (``User | None``, ``Optional[User]``)
+    collapses to the single non-``None`` type. A generic container (``list[User]``) or any other
+    form yields nothing (the variable's type is the container, not the element — left deferred).
+    Parameters only: annotated local assignments and ``x = User()`` inference are handled elsewhere.
     """
-    types: dict[str, str] = {}
+    types: dict[str, tuple[str, ...]] = {}
     for arg in _all_args(fn.args):
         if arg.annotation is not None:
-            annotated = _dotted_name(arg.annotation)
-            if annotated is not None:
-                types[arg.arg] = annotated
+            names = _annotation_types(arg.annotation)
+            if names:
+                types[arg.arg] = names
     return types
+
+
+# The special forms whose subscript is a receiver type (``Optional[X]``, ``Union[X, Y]``), matched
+# on the head's final component so ``Optional`` / ``typing.Optional`` / ``t.Optional`` all count.
+# Every other subscript head (``list``, ``dict``) denotes a container, not the element's type.
+_OPTIONAL_UNION = frozenset({"Optional", "Union"})
+
+
+def _annotation_types(ann: ast.expr) -> tuple[str, ...]:
+    """The concrete receiver type name(s) an annotation denotes — see ``_annotated_types``.
+    Order-preserving and deduped, so ``User | User`` and ``Union[User, None]`` stay ``("User",)``.
+    """
+    out: list[str] = []
+    _collect_annotation_types(ann, out)
+    seen: set[str] = set()
+    return tuple(t for t in out if t not in seen and not seen.add(t))
+
+
+def _collect_annotation_types(node: ast.expr, out: list[str]) -> None:
+    """Walk an annotation, appending each concrete type name. ``X | Y`` (PEP 604) recurses both
+    arms; ``Optional[X]`` / ``Union[...]`` recurse the subscript's element(s); a bare ``None`` arm
+    is dropped (it is not a receiver type); any other subscript (``list[X]``) is a container and
+    contributes nothing; a plain/dotted name is the type itself."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        _collect_annotation_types(node.left, out)
+        _collect_annotation_types(node.right, out)
+        return
+    if isinstance(node, ast.Constant) and node.value is None:
+        return  # the ``None`` arm of an Optional / union — not a receiver type
+    if isinstance(node, ast.Subscript):
+        head = _dotted_name(node.value)
+        if head is not None and head.rsplit(".", 1)[-1] in _OPTIONAL_UNION:
+            elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+            for elt in elts:
+                _collect_annotation_types(elt, out)
+        return  # a container subscript (``list[X]``) denotes the container, not ``X`` — deferred
+    dotted = _dotted_name(node)
+    if dotted is not None:
+        out.append(dotted)
 
 
 def _function_scope(

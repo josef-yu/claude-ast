@@ -17,7 +17,7 @@ from .serialize import from_json, to_json
 
 # Bump whenever the persisted parse products change shape OR the parser's output
 # semantics change (e.g. the refs/scope rewrite) — a bump discards stale caches.
-_SCHEMA_VERSION = 23  # @property -> PROPERTY kind, @staticmethod -> is_static (decorator tracking)
+_SCHEMA_VERSION = 24  # RawRef.receiver_types (union fan-out): `rt` blob key is a list, not a str
 
 
 class SqliteStore(Store):

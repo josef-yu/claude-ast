@@ -137,6 +137,105 @@ def test_subscripted_annotation_is_not_read_as_the_element_type(tmp_path):
     assert "annotation" not in sources
 
 
+# --- richer annotation forms: Optional collapse + union fan-out ---
+
+_TWO_CLASSES = (
+    "class User:\n    def save(self):\n        ...\n\n\n"
+    "class Admin:\n    def save(self):\n        ...\n\n\n"
+)
+
+
+def _annotation_targets(index, src):
+    return {e.dst for e in index.graph.out_edges(src) if e.resolution.source.value == "annotation"}
+
+
+def test_optional_param_receiver_collapses_to_the_type(tmp_path):
+    # `u: User | None` IS a `User` at the call site (the None arm is not a receiver type), so it
+    # resolves exactly like a bare `u: User` — a single ANNOTATION edge, no fan-out.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def store(u: User | None):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.store") == {"m.User.save"}
+
+
+def test_optional_subscript_param_collapses_to_the_type(tmp_path):
+    # `Optional[User]` is the typing spelling of `User | None` — same single-type collapse.
+    (tmp_path / "m.py").write_text(
+        "from typing import Optional\n\n\n"
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "def store(u: Optional[User]):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.store") == {"m.User.save"}
+
+
+def test_union_param_fans_out_to_each_arm(tmp_path):
+    # `u: User | Admin` — a member call could dispatch to either, so it fans out to one possible
+    # ANNOTATION edge per in-tree arm, both anchored at the single `u.save()` site.
+    (tmp_path / "m.py").write_text(
+        _TWO_CLASSES + "def store(u: User | Admin):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+    deps = {(d.id, d.tier) for d in index.find_dependencies("m.store")}
+    assert ("m.User.save", "possible") in deps
+    assert ("m.Admin.save", "possible") in deps
+    # both edges are ANNOTATION and share the one call site's span
+    edges = [e for e in index.graph.out_edges("m.store") if e.dst.endswith(".save")]
+    assert {e.resolution.source.value for e in edges} == {"annotation"}
+    assert all(e.at is not None for e in edges)
+    assert len({(e.at.line, e.at.col) for e in edges if e.at is not None}) == 1
+    # the reverse: the same site is a caller of each arm
+    assert "m.store" in {r.id for r in index.find_callers("m.User.save")}
+    assert "m.store" in {r.id for r in index.find_callers("m.Admin.save")}
+
+
+def test_union_subscript_param_fans_out_to_each_arm(tmp_path):
+    # `Union[User, Admin]` fans out identically to `User | Admin`.
+    (tmp_path / "m.py").write_text(
+        "from typing import Union\n\n\n" + _TWO_CLASSES
+        + "def store(u: Union[User, Admin]):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.store") == {"m.User.save", "m.Admin.save"}
+
+
+def test_union_arm_without_the_member_is_dropped(tmp_path):
+    # `u: User | Admin` where only `User` defines `save`: the Admin arm resolves no member and is
+    # silently dropped — one honest edge, never a wrong one.
+    (tmp_path / "m.py").write_text(
+        "class User:\n    def save(self):\n        ...\n\n\n"
+        "class Admin:\n    def other(self):\n        ...\n\n\n"
+        "def store(u: User | Admin):\n    return u.save()\n"
+    )
+    index = Index.build(tmp_path)
+    assert _annotation_targets(index, "m.store") == {"m.User.save"}
+
+
+def test_optional_external_param_stubs_the_member(tmp_path):
+    # `p: Path | None` collapses to the external `Path`, whose member resolves via the stub tables.
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\ndef store(p: Path | None):\n    return p.exists()\n"
+    )
+    index = Index.build(tmp_path)
+    edges = {(e.dst, e.resolution.source.value) for e in index.graph.out_edges("m.store")}
+    assert ("pathlib.Path.exists", "stub") in edges
+
+
+def test_mixed_intree_external_union_resolves_each_arm(tmp_path):
+    # `x: User | Path` — the in-tree arm resolves `save` as an ANNOTATION edge, the external arm
+    # resolves `exists` via the stub tables; each member binds on the arm that carries it.
+    (tmp_path / "m.py").write_text(
+        "from pathlib import Path\n\n\nclass User:\n    def save(self):\n        ...\n\n\n"
+        "def store(x: User | Path):\n    x.save()\n    x.exists()\n"
+    )
+    index = Index.build(tmp_path)
+    edges = {(e.dst, e.resolution.source.value) for e in index.graph.out_edges("m.store")}
+    assert ("m.User.save", "annotation") in edges
+    assert ("pathlib.Path.exists", "stub") in edges
+
+
 def test_double_dot_relative_import_feeds_annotation_resolution(tmp_path):
     pkg = tmp_path / "pkg"
     (pkg / "sub").mkdir(parents=True)

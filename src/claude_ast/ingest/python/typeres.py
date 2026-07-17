@@ -116,7 +116,8 @@ def resolve_value_types(
     """Resolve value-typed receiver calls to ``possible`` edges — a confidence ladder:
 
     - ``self.m()`` -> the enclosing class's member (INFERENCE); ``self`` *is* that class.
-    - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type.
+    - ``u.m()`` with ``u: User`` -> ``User.m`` (ANNOTATION); the parameter's declared type. A union
+      (``u: User | Admin``) fans out to one edge per arm; ``User | None`` collapses to ``User``.
     - ``x.m()`` after ``x = User()`` -> ``User.m`` (INFERENCE); the constructed type.
     - ``p.m()`` with ``p: Path`` (an *external* type) -> ``pathlib.Path.m`` if the stub
       provider knows the member (STUB); the external counterpart of the annotation case.
@@ -166,35 +167,31 @@ def _resolve_call_return_chain(
     """A value-rooted call-return chain (`self.get().run()`): resolve the receiver's class, look up
     the receiver member's return type, then thread the trailing members through their returns. Every
     hop is a *call*, so it looks up callable members and advances through ``returns`` (a called
-    method's return type) — never ``attr_types``. A multi-member *receiver* (`self.a.get()`) is
-    deferred."""
+    method's return type) — never ``attr_types``. A union receiver (`u: User | Admin`) threads each
+    arm and unions the edges. A multi-member *receiver* (`self.a.get()`) is deferred."""
     r_root, _, r_member = ref.name.partition(".")
     if "." in r_member:
         return []  # multi-member receiver (self.a.get) -> deferred
     members, bases, returns = ctx.members, ctx.bases, ctx.returns
-    if r_root == "self":
-        cls = _self_class(ref.src, ctx.by_id)
-    elif ref.receiver_type is not None:
-        cls = resolve_type_name(
-            ref.receiver_type, module_defs, imports, ctx.all_ids, ctx.reexports, ctx.by_id
-        )
-    else:
-        cls = None
-    # Source provenance: ANNOTATION only if every fact used was declared — a self/inferred receiver
-    # or a body-inferred return hop makes it INFERENCE.
-    inferred = r_root == "self" or ref.receiver_inferred
-    recv = _member_lookup(cls, r_member, members, bases) if cls else None
-    typ, hop_inferred = returns.get(recv, (None, False)) if recv else (None, False)
-    inferred = inferred or hop_inferred
-    for name in ref.chain[:-1]:
-        hop = _member_lookup(typ, name, members, bases) if typ else None
-        typ, hop_inferred = returns.get(hop, (None, False)) if hop else (None, False)
+    out: list[Edge] = []
+    seen: set[SymbolId] = set()
+    for cls, arm_inferred in _receiver_classes(ref, r_root, ctx, module_defs, imports):
+        # Source provenance: ANNOTATION only if every fact used was declared — a self/inferred
+        # receiver or a body-inferred return hop makes it INFERENCE.
+        inferred = arm_inferred
+        recv = _member_lookup(cls, r_member, members, bases)
+        typ, hop_inferred = returns.get(recv, (None, False)) if recv else (None, False)
         inferred = inferred or hop_inferred
-    target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
-    if target is None:
-        return []
-    res = Resolution.inferred() if inferred else Resolution.annotated()
-    return [Edge(ref.src, target, ref.kind, res, ref.at)]
+        for name in ref.chain[:-1]:
+            hop = _member_lookup(typ, name, members, bases) if typ else None
+            typ, hop_inferred = returns.get(hop, (None, False)) if hop else (None, False)
+            inferred = inferred or hop_inferred
+        target = _member_lookup(typ, ref.chain[-1], members, bases) if typ else None
+        if target is not None and target not in seen:
+            seen.add(target)
+            res = Resolution.inferred() if inferred else Resolution.annotated()
+            out.append(Edge(ref.src, target, ref.kind, res, ref.at))
+    return out
 
 
 def _resolve_receiver_ref(
@@ -202,63 +199,88 @@ def _resolve_receiver_ref(
     imports: dict[str, str], stubs: StubProvider,
 ) -> tuple[list[Edge], list[Symbol]]:
     """A value receiver ``root.a.b…`` with no intermediate call. Resolve ``root`` to its in-tree
-    class, then thread the member chain to a target (one MEDIUM edge). When ``root`` has no in-tree
-    class, a *single* attribute still gets the last-resort rungs — an untyped receiver name-matches
-    (heuristic, LOW), an external one consults stubs; a multi-member chain has no type to thread and
-    declines. A READ (REFERENCE) may land on a data attribute, a CALL must be callable."""
+    class(es), thread the member chain on each to a target, and union the edges (one MEDIUM edge
+    per distinct target — a union receiver ``u: User | Admin`` fans out to both arms). External
+    arms of a *single* attribute additionally consult the stub provider. When ``root`` is untyped,
+    a single attribute name-matches (heuristic, LOW) and a chain declines; a typed receiver that
+    resolves no member stays silent. A READ may land on a data attribute; a CALL must be callable.
+    """
     root, _, rest = ref.name.partition(".")
     if not rest:
         return [], []  # a bare local name (no attribute) — nothing to resolve
     chain = rest.split(".")  # `self.a.b` -> ["a", "b"]; `self.attr` -> ["attr"]
     is_read = ref.kind is EdgeKind.REFERENCE
-    class_id, inferred = _receiver_class(ref, root, ctx, module_defs, imports)
-    if class_id is None:
-        # No in-tree receiver class. A chain (or a `self` outside a method) declines; a single
-        # attribute falls to the last-resort rungs.
-        if len(chain) > 1 or root == "self":
+    if not ref.receiver_types and root != "self":
+        # Untyped receiver: a single attribute name-matches; a chain has no type to thread.
+        if len(chain) > 1:
             return [], []
-        if ref.receiver_type is None:
-            return _heuristic_edges(ref, chain[0], is_read, ctx), []
-        return _stub_edge(ref, chain[0], is_read, ctx, module_defs, imports, stubs)
-    target, inferred, untyped = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
-    if target is not None:
-        res = Resolution.inferred() if inferred else Resolution.annotated()
-        return [Edge(ref.src, target, ref.kind, res, ref.at)], []
-    if untyped:
-        # an intermediate data attribute has an un-threadable type, so the last member's receiver is
-        # untyped — name-match the last member (LOW), exactly as a single-hop `obj.attr` would.
+        return _heuristic_edges(ref, chain[0], is_read, ctx), []
+    edges: list[Edge] = []
+    externals: list[Symbol] = []
+    seen: set[SymbolId] = set()
+    untyped_any = False
+    classes = _receiver_classes(ref, root, ctx, module_defs, imports)
+    for class_id, inferred in classes:
+        target, thr_inf, untyped = _thread_member_chain(class_id, chain, inferred, is_read, ctx)
+        if target is not None and target not in seen:
+            seen.add(target)
+            res = Resolution.inferred() if thr_inf else Resolution.annotated()
+            edges.append(Edge(ref.src, target, ref.kind, res, ref.at))
+        untyped_any = untyped_any or untyped
+    # External arms resolve a single attribute against the stub tables. An in-tree name is never a
+    # stub target, so only an arm that did NOT resolve in-tree can be external — skip the lookup
+    # entirely when every candidate type already bound to an in-tree class (the common case).
+    if len(chain) == 1 and len(classes) < len(ref.receiver_types):
+        stubbed = _stub_targets(ref, chain[0], is_read, ctx, module_defs, imports, stubs)
+        for member_id, ext in stubbed:
+            if member_id not in seen:
+                seen.add(member_id)
+                edges.append(Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at))
+                externals.append(ext)
+    if edges:
+        return edges, externals
+    if untyped_any:
+        # every arm declined and one hit an intermediate data attribute of un-threadable type, so
+        # the last member's receiver is untyped — name-match it (LOW), as a single-hop `obj.attr`.
         return _heuristic_edges(ref, chain[-1], is_read, ctx), []
     return [], []
 
 
-def _receiver_class(
+def _receiver_classes(
     ref: RawRef, root: str, ctx: ResolveIndex,
     module_defs: dict[str, str], imports: dict[str, str],
-) -> tuple[SymbolId | None, bool]:
-    """The in-tree CLASS a receiver ``root`` denotes, plus whether any fact used was inferred
-    (INFERENCE vs ANNOTATION provenance). ``None`` class for an untyped/external/unresolved root, or
-    a ``self`` outside a method — the caller picks the fallback. ``self`` is INFERENCE (its type is
-    exact, but dispatch is open-world); an annotated receiver ANNOTATION unless constructed."""
+) -> list[tuple[SymbolId, bool]]:
+    """The in-tree CLASS(es) a receiver ``root`` denotes, each with whether any fact used was
+    inferred (INFERENCE vs ANNOTATION provenance). ``self`` -> its enclosing class (INFERENCE — the
+    type is exact, but dispatch is open-world). Otherwise one entry per candidate type name: a union
+    annotation yields several, deduped; an unresolved/external arm contributes nothing. An annotated
+    arm is ANNOTATION; a constructed/factory one INFERENCE. Empty for an untyped receiver or a
+    ``self`` outside a method."""
     if root == "self":
-        return _self_class(ref.src, ctx.by_id), True
-    if ref.receiver_type is None:
-        return None, False  # an untyped receiver
-    class_id = resolve_type_name(
-        ref.receiver_type, module_defs, imports, ctx.all_ids, ctx.reexports, ctx.by_id
-    )
-    if class_id is not None:
-        return class_id, ref.receiver_inferred
-    # the receiver may be a *call* whose return type is an in-tree class: `s = make(); s.inner()`
-    # where `make() -> Service`. resolve_type_name declined (make is a function, not a class), so
-    # follow its return type — a CALL, so ``returns`` (never a variable's read-type ``attr_types``).
-    callee = bind(
-        ref.receiver_type, module_defs, imports, ctx.all_ids, ctx.internal_roots, ctx.reexports
-    )
-    if callee is not None and not callee[1]:
-        cls, ret_inferred = ctx.returns.get(callee[0], (None, False))
-        if cls is not None:
-            return cls, ref.receiver_inferred or ret_inferred
-    return None, False
+        cls = _self_class(ref.src, ctx.by_id)
+        return [(cls, True)] if cls is not None else []
+    out: list[tuple[SymbolId, bool]] = []
+    seen: set[SymbolId] = set()
+    for name in ref.receiver_types:
+        class_id = resolve_type_name(
+            name, module_defs, imports, ctx.all_ids, ctx.reexports, ctx.by_id
+        )
+        inferred = ref.receiver_inferred
+        if class_id is None:
+            # the name may be a *call* whose return is an in-tree class: `s = make(); s.inner()`
+            # where `make() -> Service`. resolve_type_name declined (make is a func, not a class),
+            # so follow its return — a CALL, so ``returns`` (never a read-type ``attr_types``).
+            callee = bind(
+                name, module_defs, imports, ctx.all_ids, ctx.internal_roots, ctx.reexports
+            )
+            if callee is not None and not callee[1]:
+                cls, ret_inferred = ctx.returns.get(callee[0], (None, False))
+                class_id = cls
+                inferred = ref.receiver_inferred or ret_inferred
+        if class_id is not None and class_id not in seen:
+            seen.add(class_id)
+            out.append((class_id, inferred))
+    return out
 
 
 def _thread_member_chain(
@@ -310,24 +332,29 @@ def _heuristic_edges(ref: RawRef, attr: str, is_read: bool, ctx: ResolveIndex) -
     return [Edge(ref.src, t, ref.kind, Resolution.heuristic(), ref.at) for t in candidates]
 
 
-def _stub_edge(
+def _stub_targets(
     ref: RawRef, attr: str, is_read: bool, ctx: ResolveIndex,
     module_defs: dict[str, str], imports: dict[str, str], stubs: StubProvider,
-) -> tuple[list[Edge], list[Symbol]]:
-    """External receiver type: consult the stub provider for ``attr`` and mint a MEDIUM STUB edge to
-    an EXTERNAL member node. A call needs a callable member (`p.exists()`); a read accepts any
-    member, including a property/data attribute (`p.name`) a call would decline."""
-    if ref.receiver_type is None:
-        return [], []
-    ext = resolve_external_type_name(
-        ref.receiver_type, module_defs, imports, ctx.all_ids, ctx.internal_roots, ctx.reexports
-    )
-    member = stubs.type_member(ext, attr) if ext is not None else None
-    if member is None or not (is_read or member[0] in _CALLABLE_STUB_KINDS):
-        return [], []
-    member_id = f"{ext}.{attr}"
-    edge = Edge(ref.src, member_id, ref.kind, Resolution.stubbed(), ref.at)
-    return [edge], [external_symbol(member_id)]
+) -> list[tuple[SymbolId, Symbol]]:
+    """External receiver arms: for each type name that resolves to an *external* type carrying
+    ``attr`` in the stub tables, the ``(member id, EXTERNAL member node)`` pair for a MEDIUM STUB
+    edge. A union of externals (or a mixed union's external arms) yields several, deduped; an
+    in-tree name contributes nothing (the caller resolved those). A call needs a callable member
+    (`p.exists()`); a read accepts any member, including a property/data attribute (`p.name`)."""
+    out: list[tuple[SymbolId, Symbol]] = []
+    seen: set[SymbolId] = set()
+    for name in ref.receiver_types:
+        ext = resolve_external_type_name(
+            name, module_defs, imports, ctx.all_ids, ctx.internal_roots, ctx.reexports
+        )
+        member = stubs.type_member(ext, attr) if ext is not None else None
+        if member is None or not (is_read or member[0] in _CALLABLE_STUB_KINDS):
+            continue
+        member_id = f"{ext}.{attr}"
+        if member_id not in seen:
+            seen.add(member_id)
+            out.append((member_id, external_symbol(member_id)))
+    return out
 
 
 def resolve_intree_chains(

@@ -301,7 +301,7 @@ def _untyped_method_names(fi: FileIndex) -> set[str]:
             continue
         if "." in rest:
             names.add(rest.rsplit(".", 1)[-1])  # multi-member chain -> LOW fallback on last member
-        elif ref.receiver_type is None:
+        elif not ref.receiver_types:
             names.add(rest)  # single untyped attribute
     return names
 

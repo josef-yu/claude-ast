@@ -280,7 +280,7 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
 
     # ...and the annotation (handle) + construction-inference (bootstrap) edges, plus the chain
     # through a construction-typed instance attribute (Bootstrapper.launch -> self.service.run()) —
-    # all reproduced only if receiver_type / receiver_inferred / the instance-attr type round-trip.
+    # all reproduced only if receiver_types / receiver_inferred / the instance-attr type round-trip.
     run_callers = {
         "sample_pkg.service.handle",
         "sample_pkg.service.bootstrap",
@@ -299,7 +299,7 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     assert receives(warm_index, "sample_pkg.service.consume") == consume_gets
 
     # ...and the stub edge on an external type (`name.upper()` -> builtins.str.upper),
-    # reproduced only if RawRef.receiver_type round-trips through the store.
+    # reproduced only if RawRef.receiver_types round-trips through the store.
     def str_stub(index: Index) -> set[str]:
         return {
             d.id for d in index.find_dependencies("sample_pkg.externals.normalize") if d.external
@@ -309,7 +309,7 @@ def test_warm_rebuild_reproduces_results(tmp_path: Path, monkeypatch: pytest.Mon
     assert str_stub(warm_index) == {"builtins.str.upper"}
 
     # ...and the attribute-read REFERENCE edges, reproduced only if the new REFERENCE refs survive
-    # the round-trip (they reuse local_root/receiver_type — no new field, just a new ref kind).
+    # the round-trip (they reuse local_root/receiver_types — no new field, just a new ref kind).
     def readers(index: Index, sym: str) -> set[str]:
         return {r.id for r in index.find_references(sym) if r.kind == "reference"}
 

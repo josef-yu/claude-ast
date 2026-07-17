@@ -24,11 +24,14 @@ class RawRef:
     ``local_root`` marks a value receiver — the root name is a local (``self``,
     a parameter, a local var) — which syntactic binding must *never* touch (a
     local can shadow an import, so binding it would forge a wrong edge); these
-    are left for the type resolvers. ``receiver_type`` is the receiver's static type
-    name (``User``, ``models.User``) when known — from a parameter annotation or a
-    local ``x = Foo()`` construction — the fact the type resolvers bind; ``None`` when
-    there is no such fact. ``receiver_inferred`` distinguishes the source: True for a
-    construction inference (``INFERENCE``), False for a declared annotation.
+    are left for the type resolvers. ``receiver_types`` are the receiver's static type
+    name(s) when known — from a parameter annotation or a local ``x = Foo()``
+    construction — the fact(s) the type resolvers bind. Usually one (``("User",)``,
+    ``("models.User",)``); a union annotation carries several (``User | Admin`` ->
+    ``("User", "Admin")``, resolved to one edge per arm), and ``X | None`` /
+    ``Optional[X]`` collapse to the single ``("X",)``. Empty when there is no such
+    fact. ``receiver_inferred`` distinguishes the source: True for a construction
+    inference (``INFERENCE``), False for a declared annotation.
 
     ``arg_types`` records, on a name-callee ``CALL`` ref (``g(User())``), the concrete
     types observed flowing into the callee's positional parameters: element *k* is the
@@ -52,7 +55,7 @@ class RawRef:
     name: str
     at: Span
     local_root: bool = False
-    receiver_type: str | None = None
+    receiver_types: tuple[str, ...] = ()
     receiver_inferred: bool = False
     arg_types: tuple[str | None, ...] = ()
     chain: tuple[str, ...] = ()
