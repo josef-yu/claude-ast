@@ -83,9 +83,11 @@ def resolve_value_types(
     A **multi-member chain** (``self.a.b``, ``u.a.b()``) threads one hop per member: each member
     but the last is read as a value and advances to its declared type (via ``attr_types``) — but
     only through a DATA attribute (``a: T``), since a method accessed-not-called is a bound method,
-    not its return type. The last member is the target. Runs after syntactic binding so the INHERITS
+    not its return type. The last member is the target. A chain whose receiver ends in a call
+    (``self.a.get().run()``) is handled too: the data-attribute prefix threads to the call's
+    type, its return starts the trailing call chain. Runs after syntactic binding so the INHERITS
     edges the base walk needs are already in ``edges``; ``local_root`` refs only. Deferred: external
-    and method/property intermediate hops, and chains with an intermediate call (self.a.get()).
+    intermediate hops, and a trailing hop that is a data attribute rather than a call.
     """
     out: list[Edge] = []
     externals: list[Symbol] = []  # stub member nodes minted for out-of-tree receiver types
@@ -108,40 +110,45 @@ def resolve_value_types(
 def _resolve_call_return_chain(
     ref: RawRef, ctx: ResolveIndex, module_defs: dict[str, str], imports: dict[str, str]
 ) -> list[Edge]:
-    """A value-rooted call-return chain (`self.get().run()`): resolve the receiver's class, look up
-    the receiver member's return type, then thread the trailing members through their returns. Every
-    hop is a *call*, so it looks up callable members and advances through ``returns`` (a called
-    method's return type) — never ``attr_types``. A union receiver (`u: User | Admin`) threads each
-    arm and unions the edges. A multi-member *receiver* (`self.a.get()`) is deferred."""
-    r_root, _, r_member = ref.name.partition(".")
-    if "." in r_member:
-        return []  # multi-member receiver (self.a.get) -> deferred
+    """A value-rooted call-return chain (`self.get().run()`, `self.a.get().run()`): resolve the
+    receiver's class, thread the receiver's *data-attribute* prefix (``self.a`` — read via
+    ``attr_types``) to the type its call member is on, take that member's return type, then
+    thread the trailing members through their returns. Every trailing hop is a *call*, advancing
+    through ``returns`` (a called method's return) — never ``attr_types``. A union receiver
+    (`u: User | Admin`) threads each arm and unions the edges."""
+    r_root, _, r_rest = ref.name.partition(".")
+    r_members = r_rest.split(".") if r_rest else []
+    if not r_members:
+        return []  # the receiver is the bare root called (`foo().bar()`) — a value call, unmodeled
     seen: set[SymbolId] = set()
     primary = FlowKind.FLOW if ref.receiver_flow else FlowKind.STABLE
     out = _chain_arm_edges(
-        ref, r_root, ref.receiver_types, primary, r_member, ctx, module_defs, imports, seen
+        ref, r_root, ref.receiver_types, primary, r_members, ctx, module_defs, imports, seen
     )
     if ref.receiver_may_types:  # union widening for a reassigned chain receiver
         out += _chain_arm_edges(
-            ref, r_root, ref.receiver_may_types, FlowKind.MAY, r_member, ctx, module_defs, imports,
+            ref, r_root, ref.receiver_may_types, FlowKind.MAY, r_members, ctx, module_defs, imports,
             seen,
         )
     return out
 
 
 def _chain_arm_edges(
-    ref: RawRef, r_root: str, type_names: tuple[str, ...], flow: FlowKind, r_member: str,
+    ref: RawRef, r_root: str, type_names: tuple[str, ...], flow: FlowKind, r_members: list[str],
     ctx: ResolveIndex, module_defs: dict[str, str], imports: dict[str, str], seen: set[SymbolId],
 ) -> list[Edge]:
     """The call-return-chain edges for one set of receiver arms (``type_names``), tagged ``flow``.
-    Threads each arm's receiver-member return type through the trailing members; dedups via
-    ``seen``. Source provenance: ANNOTATION only if every fact used was declared — a self/inferred
-    receiver or a body-inferred return hop makes it INFERENCE."""
+    For each arm, threads the receiver data-attribute prefix (``r_members[:-1]`` via ``attr_types``)
+    to a type, looks up the receiver call member (``r_members[-1]``) and takes its return, then
+    threads the trailing members through their returns; dedups via ``seen``. Source provenance:
+    ANNOTATION only if every fact used was declared — a self/inferred receiver or any body-inferred
+    return/attribute hop makes it INFERENCE."""
     members, bases, returns = ctx.members, ctx.bases, ctx.returns
     out: list[Edge] = []
     for cls, arm_inferred in _receiver_classes(ref, r_root, type_names, ctx, module_defs, imports):
-        inferred = arm_inferred
-        recv = _member_lookup(cls, r_member, members, bases)
+        recv_type, inferred = _thread_to_type(cls, r_members[:-1], ctx)
+        inferred = arm_inferred or inferred
+        recv = _member_lookup(recv_type, r_members[-1], members, bases) if recv_type else None
         typ, hop_inferred = returns.get(recv, (None, False)) if recv else (None, False)
         inferred = inferred or hop_inferred
         for name in ref.chain[:-1]:
@@ -157,6 +164,25 @@ def _chain_arm_edges(
             res = Resolution.annotated() if declared else Resolution.inferred()
             out.append(Edge(ref.src, target, ref.kind, _flowed(res, flow), ref.at))
     return out
+
+
+def _thread_to_type(
+    class_id: SymbolId, members: list[str], ctx: ResolveIndex,
+) -> tuple[SymbolId | None, bool]:
+    """Thread a DATA-attribute member chain from a class to the in-tree type it reaches, advancing
+    each hop through ``attr_types`` (its declared type). Returns ``(type, any-inferred)``, or
+    ``(None, ...)`` when a hop is not a threadable data attribute (untyped / external / a method
+    accessed-not-called). Empty ``members`` yields the class unchanged — the single-member-receiver
+    case (``self.get()``), where there is no prefix to thread."""
+    typ: SymbolId | None = class_id
+    inferred = False
+    for name in members:
+        member = _member_lookup(typ, name, ctx.read_members, ctx.bases) if typ is not None else None
+        if member is None:
+            return None, inferred
+        typ, hop_inferred = ctx.attr_types.get(member, (None, False))
+        inferred = inferred or hop_inferred
+    return typ, inferred
 
 
 def _resolve_receiver_ref(

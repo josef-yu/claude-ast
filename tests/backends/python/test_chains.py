@@ -228,6 +228,31 @@ def test_union_receiver_call_return_chain_threads_each_arm(tmp_path) -> None:
     assert {"m.A.get", "m.B.get", "m.Service.run"} <= deps
 
 
+def test_data_attribute_receiver_call_return_chain(tmp_path) -> None:
+    # self.svc.get().run(): the receiver `self.svc` is a typed DATA attribute (not a bare self/param
+    # or a method call), threaded via attr_types to Svc; then `.get()` returns Inner and `.run()`
+    # resolves on it. The multi-member receiver prefix now threads before the trailing call chain.
+    (tmp_path / "m.py").write_text(
+        "class Inner:\n    def run(self): ...\n\n\n"
+        "class Svc:\n    def get(self) -> Inner: return Inner()\n\n\n"
+        "class App:\n    svc: Svc\n    def use(self):\n        return self.svc.get().run()\n"
+    )
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.App.use", Confidence.LOW)}
+    assert "m.Inner.run" in deps
+
+
+def test_receiver_chain_declines_on_an_untyped_prefix(tmp_path) -> None:
+    # self.svc.get().run() where `self.svc` is an untyped instance attribute: the receiver prefix
+    # can't thread to a type, so the chain declines rather than forging an edge to a wrong `run`.
+    (tmp_path / "m.py").write_text(
+        "class Inner:\n    def run(self): ...\n\n\n"
+        "class App:\n    def __init__(self):\n        self.svc = object()\n"
+        "    def use(self):\n        return self.svc.get().run()\n"
+    )
+    deps = {d.id for d in Index.build(tmp_path).find_dependencies("m.App.use", Confidence.LOW)}
+    assert "m.Inner.run" not in deps
+
+
 def _source_of(index: Index, src: str, dst: str) -> str:
     return next(e.resolution.source.value for e in index.graph.out_edges(src) if e.dst == dst)
 
