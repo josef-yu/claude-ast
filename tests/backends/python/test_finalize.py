@@ -51,6 +51,20 @@ def test_submodule_and_same_named_member_get_distinct_ids(tmp_path):
     assert len(g.by_name("run")) == len(set(s.id for s in g.by_name("run")))
 
 
+def test_finalize_upholds_the_core_uniqueness_postcondition(tmp_path):
+    # The contract every backend's ``finalize`` must satisfy (see ``base.Indexer.finalize``): once
+    # assembled, the neutral core sees NO id collision. ``Graph.collisions()`` is the core's
+    # tripwire — it records any id two symbols both minted (what the old silent last-write-wins
+    # hid). A conforming backend keeps it empty even on a collision-prone layout, because
+    # ``finalize`` disambiguated before ``add_symbol`` ever ran. This is the conformance check a
+    # second backend's suite replicates against its own id scheme.
+    index = _build(tmp_path, {
+        "pkg/__init__.py": "class helpers:\n    def run(self):\n        ...\n",
+        "pkg/helpers.py": "def run():\n    ...\n",
+    })
+    assert index.graph.collisions() == []
+
+
 def test_no_collision_leaves_ids_untouched(tmp_path):
     # The common case: distinct qualnames -> plain dotted ids, no #N anywhere.
     index = _build(tmp_path, {

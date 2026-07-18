@@ -13,6 +13,7 @@ import logging
 from collections.abc import Sequence
 from pathlib import Path
 
+from ..base import Indexer
 from ..product import FileIndex, ResolveResult
 from .common import module_qualname
 from .finalize import ensure_unique_ids
@@ -24,7 +25,7 @@ from .symbols import extract_symbols
 logger = logging.getLogger(__name__)
 
 
-class PythonIndexer:
+class PythonIndexer(Indexer):
     """Language backend for Python source."""
 
     name = "python"

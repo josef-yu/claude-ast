@@ -32,9 +32,15 @@ comment saying why.
 
 All language-specific logic lives behind the `Indexer` protocol
 (`ingest/base.py`) in a backend module; nothing outside a backend imports `ast`.
-`ingest + resolve` are the per-backend language layer; `model / graph / query /
-rank / store / watch` are language-neutral. No backend registry until a real
-second language lands.
+The protocol's methods are `@abstractmethod`, so a real backend **subclasses**
+`Indexer` and can't be constructed until it implements the whole contract (test
+doubles may still conform structurally). `ingest + resolve` are the per-backend
+language layer; `model / graph / query / rank / store / watch` are
+language-neutral. The neutral core stays policy-free: it enforces invariants
+(e.g. `Graph.collisions()` catches a backend that lets duplicate ids reach the
+graph) but never language-specific policy (id disambiguation, declaration
+merging) — that lives in the backend's `finalize`. No backend registry until a
+real second language lands.
 
 ### Tests
 

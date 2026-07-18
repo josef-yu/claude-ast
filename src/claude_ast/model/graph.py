@@ -27,7 +27,7 @@ class Graph:
     # replaced by a patch. It costs one pointer on the single live Graph, not on any Symbol.
     __slots__ = (
         "_symbols", "_out", "_in", "_by_file", "_by_name", "_children", "_externals",
-        "__weakref__",
+        "_collisions", "__weakref__",
     )
 
     def __init__(self) -> None:
@@ -43,11 +43,26 @@ class Graph:
         # as edge sinks but deliberately absent from enumeration, name-lookup, and
         # ranking (see add_external). External-id format is a backend concern.
         self._externals: dict[SymbolId, Symbol] = {}
+        # ids that two distinct symbols both minted — see add_symbol.
+        self._collisions: list[SymbolId] = []
 
     # --- mutation (single writer) ---
 
     def add_symbol(self, sym: Symbol) -> None:
-        self._symbols[sym.id] = sym
+        # ``setdefault`` keeps the FIRST symbol for an id and tells us (identity check) when a
+        # second symbol collides, in one dict op — negligible on this per-symbol hot path.
+        #
+        # The flat opaque-id keyspace can't tell two same-qualname symbols apart: a submodule
+        # ``pkg/helpers.py`` and a ``class helpers`` in ``pkg/__init__`` both mint ``pkg.helpers``;
+        # likewise a same-qualname symbol repeated across files. Structured, per-axis-unique ids are
+        # the real fix (deferred). Until then the guard resolves the clash *deterministically*
+        # (first-in-assembly-order wins) and RECORDS it, instead of the old last-write-wins that
+        # both silently shadowed a symbol AND left ``_by_file`` / ``_by_name`` / ``_children``
+        # carrying a stale id that resolved to the wrong symbol. The dropped symbol's own members
+        # keep their (distinct) ids; only the clashing id itself is held by the winner.
+        if self._symbols.setdefault(sym.id, sym) is not sym:
+            self._collisions.append(sym.id)
+            return
         self._by_file[sym.span.file].append(sym.id)
         self._by_name[sym.name].append(sym.id)
         if sym.parent is not None:
@@ -83,6 +98,11 @@ class Graph:
 
     def externals(self) -> Iterator[Symbol]:
         return iter(self._externals.values())
+
+    def collisions(self) -> list[SymbolId]:
+        """The ids two distinct symbols both minted, deduped in first-seen order — the symbols the
+        flat id keyspace couldn't tell apart (see ``add_symbol``). Empty for a clean index."""
+        return list(dict.fromkeys(self._collisions))
 
     def symbols_in_file(self, file: str) -> list[Symbol]:
         return [self._symbols[s] for s in self._by_file.get(file, ())]

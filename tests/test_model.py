@@ -85,3 +85,34 @@ def test_external_nodes_are_edge_sinks_not_indexed_symbols():
 
     g.add_external(Symbol("os.path.join", "join", SymbolKind.EXTERNAL, Span("<external>", 0)))
     assert [s.id for s in g.externals()] == ["os.path.join"]  # idempotent
+
+
+def test_id_collision_keeps_first_and_records_without_corrupting_indexes():
+    # A submodule `pkg/helpers.py` and a `class helpers` in `pkg/__init__.py` both mint the id
+    # `pkg.helpers`. The flat id keyspace can't tell them apart; the guard keeps the first
+    # deterministically, records the clash, and — critically — never lets the second poison the
+    # by-file / by-name / children indexes (the old last-write-wins left them with a stale id).
+    g = Graph()
+    module = Symbol("pkg.helpers", "helpers", SymbolKind.MODULE, Span("pkg/helpers.py", 1))
+    klass = Symbol("pkg.helpers", "helpers", SymbolKind.CLASS, Span("pkg/__init__.py", 3))
+    g.add_symbol(module)
+    g.add_symbol(klass)  # collides — dropped
+
+    assert g.symbol("pkg.helpers") is module          # first wins
+    assert g.collisions() == ["pkg.helpers"]           # the clash is surfaced, not silent
+    assert len(g) == 1                                  # the loser is not counted
+    # the loser's file must not carry a stale id that resolves to the winner (wrong file)
+    assert g.symbols_in_file("pkg/__init__.py") == []
+    assert [s.id for s in g.symbols_in_file("pkg/helpers.py")] == ["pkg.helpers"]
+    assert [s.id for s in g.by_name("helpers")] == ["pkg.helpers"]  # counted once
+
+
+def test_id_collisions_dedupe_in_first_seen_order():
+    g = Graph()
+    g.add_symbol(Symbol("m.a", "a", SymbolKind.FUNCTION, Span("m.py", 1)))
+    g.add_symbol(Symbol("m.b", "b", SymbolKind.FUNCTION, Span("m.py", 2)))
+    # `m.a` clashes twice, `m.b` once — each id reported once, in first-seen order.
+    g.add_symbol(Symbol("m.a", "a", SymbolKind.CLASS, Span("n.py", 1)))
+    g.add_symbol(Symbol("m.b", "b", SymbolKind.CLASS, Span("n.py", 2)))
+    g.add_symbol(Symbol("m.a", "a", SymbolKind.CLASS, Span("o.py", 1)))
+    assert g.collisions() == ["m.a", "m.b"]

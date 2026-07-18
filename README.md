@@ -159,8 +159,9 @@ Landed features are above; these are the known gaps, kept out of scope on purpos
   opt-in flag that includes them, flagged as function-local.
 - **repo-map ranking** — test files reference everything, so they float to the top and crowd
   the budget; down-rank test code in the ranker.
-- **id scheme** — the structured module/member id redesign (the lean fixes are in; the
-  cross-file collision guard is dormant — 0 hits across Django's 17.7k symbols).
+- **id scheme** — the structured module/member id redesign: symbol ids are flat opaque
+  dotted qualnames (disambiguated with `#N`) today; a structured, per-axis-unique scheme
+  is a future refinement, not a current correctness gap.
 - **P3 refinements** — persisting live-session edits back to the snapshot; **last-good-parse
   retention** (a mid-edit syntax error drops the file from the served view today — keep the
   previous good parse, marked stale, until the file parses again). *(Incremental resolve on
